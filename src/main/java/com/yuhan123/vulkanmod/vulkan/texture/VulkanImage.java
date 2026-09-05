@@ -315,7 +315,6 @@ public class VulkanImage {
 
     public static void transitionImageLayout(MemoryStack stack, VkCommandBuffer commandBuffer, VulkanImage image, int newLayout) {
         if (image.currentLayout == newLayout) {
-//            System.out.println("new layout is equal to current layout");
             return;
         }
 

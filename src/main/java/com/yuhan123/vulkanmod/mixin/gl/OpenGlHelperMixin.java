@@ -15,7 +15,7 @@ import java.nio.IntBuffer;
 public class OpenGlHelperMixin {
     // OpenGlHelper is a Forge class: its methods keep the MCP names in both the
     // dev (mcp-at) jar and the release jar, so the mixins must use MCP names.
-    @Overwrite(remap = false)
+    @Overwrite()
     public static void initializeTextures() {
         // The game reads OpenGlHelper.GL_ARRAY_BUFFER for VBO binding; initialize it
         // here since the vanilla initializeTextures body was replaced.
@@ -38,11 +38,6 @@ public class OpenGlHelperMixin {
         net.minecraft.client.renderer.OpenGlHelper.defaultTexUnit = 33984;
         net.minecraft.client.renderer.OpenGlHelper.lightmapTexUnit = 33985;
         net.minecraft.client.renderer.OpenGlHelper.GL_TEXTURE2 = 33986;
-
-        System.out.println("[FBO] framebufferSupported=" + net.minecraft.client.renderer.OpenGlHelper.framebufferSupported
-            + " shadersSupported=" + net.minecraft.client.renderer.OpenGlHelper.shadersSupported
-            + " fboEnable=" + net.minecraft.client.Minecraft.getMinecraft().gameSettings.fboEnable
-            + " isFramebufferEnabled=" + net.minecraft.client.renderer.OpenGlHelper.isFramebufferEnabled());
     }
 
     /**
@@ -136,7 +131,7 @@ public class OpenGlHelperMixin {
     /**
      * @author
      */
-    @Overwrite(remap = false)
+    @Overwrite
     public static int glGenBuffers() {
         //RenderSystem.assertOnRenderThreadOrInit();
         return VkGlBuffer.glGenBuffers();
@@ -146,7 +141,7 @@ public class OpenGlHelperMixin {
      * @author
      */
 
-    @Overwrite(remap = false)
+    @Overwrite
     public static void glBindBuffer(int i, int j) {
         VkGlBuffer.glBindBuffer(i, j);
     }
@@ -154,7 +149,7 @@ public class OpenGlHelperMixin {
     /**
      * @author
      */
-    @Overwrite(remap = false)
+    @Overwrite
     public static void glBufferData(int i, ByteBuffer byteBuffer, int j) {
         //RenderSystem.assertOnRenderThread();
         VkGlBuffer.glBufferData(i, byteBuffer, j);
@@ -169,7 +164,7 @@ public class OpenGlHelperMixin {
 //        VkGlBuffer.glBufferData(i, l, j);
 //    }
 
-    @Overwrite(remap = false)
+    @Overwrite
     public static void setActiveTexture(int i) {
         VkGlTexture.activeTexture(i);
     }
@@ -180,14 +175,14 @@ public class OpenGlHelperMixin {
      * real GL context current (the window is Vulkan-only), so this must be a
      * no-op; the shader samplers are selected by the Vulkan descriptor sets.
      */
-    @Overwrite(remap = false)
+    @Overwrite
     public static void setClientActiveTexture(int i) {
     }
 
     /**
      * @author
      */
-    @Overwrite(remap = false)
+    @Overwrite
     public static void setLightmapTextureCoords(int target, float p_77475_1_, float p_77475_2_) {
         // The lightmap coordinates are handled via the shader's lightmap texture
     }
@@ -195,7 +190,7 @@ public class OpenGlHelperMixin {
     /**
      * @author
      */
-    @Overwrite(remap = false)
+    @Overwrite
     public static void glDeleteBuffers(int i) {
         //RenderSystem.assertOnRenderThread();
         VkGlBuffer.glDeleteBuffers(i);
@@ -204,7 +199,7 @@ public class OpenGlHelperMixin {
     /**
      * @author
      */
-    @Overwrite(remap = false)
+    @Overwrite
     public static void glBlendFunc(int srcRgb, int dstRgb, int srcAlpha, int dstAlpha) {
         com.yuhan123.vulkanmod.vulkan.VRenderSystem.blendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
     }

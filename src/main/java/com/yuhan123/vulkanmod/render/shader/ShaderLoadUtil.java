@@ -12,16 +12,22 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.nio.file.FileSystems;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 
 public abstract class ShaderLoadUtil {
 
-    public static final String RESOURCES_PATH = SPIRVUtils.class.getResource("/assets/vulkanmod").toExternalForm();
+    /**
+     * Root of the mod's shader resources, expressed as a CLASSPATH path.
+     *
+     * <p>This used to be {@code getResource("/assets/vulkanmod").toExternalForm()}
+     * with every lookup going through {@code Paths.get(new URI(path))}. That only
+     * works while the resources are exploded on disk, i.e. in the dev workspace.
+     * Inside a real mod jar the URI becomes
+     * {@code jar:file:/.../mods/vulkanmod-1.0.0.jar!/assets/vulkanmod} and
+     * {@code Paths.get()} throws {@code FileSystemNotFoundException} because the
+     * jar has not been mounted with {@code FileSystems.newFileSystem()}.
+     * {@code ClassLoader.getResourceAsStream()} handles both cases, so use it.</p>
+     */
+    public static final String RESOURCES_PATH = "/assets/vulkanmod";
 
     public static void loadShaders(Pipeline.Builder pipelineBuilder, JsonObject config, String configName, String path) {
         String vertexShader = config.has("vertex") ? config.get("vertex").getAsString() : configName;
@@ -54,7 +60,12 @@ public abstract class ShaderLoadUtil {
 
         switch (type) {
             case VERTEX_SHADER -> pipelineBuilder.setVertShaderSPIRV(spirv);
-            case FRAGMENT_SHADER -> pipelineBuilder.setFragShaderSPIRV(spirv);
+            case FRAGMENT_SHADER -> {
+                pipelineBuilder.setFragShaderSPIRV(spirv);
+                pipelineBuilder.compileFragNoDiscardVariant(shaderName, source);
+                pipelineBuilder.compileFragEarlyTestVariant(shaderName, source);
+                pipelineBuilder.compileFragDepthOnlyVariant(shaderName, source);
+            }
         }
     }
 
@@ -62,23 +73,15 @@ public abstract class ShaderLoadUtil {
         String basePath = "%s/shaders/%s".formatted(RESOURCES_PATH, path);
         String configPath = "%s/%s/%s.json".formatted(basePath, rendertype, rendertype);
 
-        Path filePath;
-        try {
-            filePath = FileSystems.getDefault().getPath(configPath);
+        if (!resourceExists(configPath)) {
+            configPath = "%s/%s.json".formatted(basePath, rendertype);
 
-            if (!Files.exists(filePath)) {
-                configPath = "%s/%s.json".formatted(basePath, rendertype);
-                filePath = FileSystems.getDefault().getPath(configPath);
-            }
-
-            if (!Files.exists(filePath)) {
+            if (!resourceExists(configPath)) {
                 return null;
             }
-        } catch (Throwable e) {
-            throw new RuntimeException(e);
         }
 
-        return filePath.toString();
+        return configPath;
     }
 
     public static JsonObject getJsonConfig(String path, String rendertype) {
@@ -178,16 +181,32 @@ public abstract class ShaderLoadUtil {
         return new String[] {path.substring(0, idx), path.substring(idx + 1)};
     }
 
+    /**
+     * Opens a mod resource by classloader path. Works both when the resources
+     * are exploded on disk (dev) and when they live inside the mod jar
+     * (production). Returns {@code null} when the resource does not exist --
+     * callers rely on that to fall back to an alternative file name.
+     */
     public static InputStream getInputStream(String path) {
         try {
-            var path1 = Paths.get(new URI(path));
-
-            if (!Files.exists(path1))
-                return null;
-
-            return Files.newInputStream(path1);
-        } catch (URISyntaxException | IOException e) {
-            throw new RuntimeException(e);
+            return ShaderLoadUtil.class.getResourceAsStream(path);
+        } catch (Throwable e) {
+            return null;
         }
+    }
+
+    public static boolean resourceExists(String path) {
+        InputStream stream = getInputStream(path);
+
+        if (stream == null) {
+            return false;
+        }
+
+        try {
+            stream.close();
+        } catch (IOException ignored) {
+        }
+
+        return true;
     }
 }

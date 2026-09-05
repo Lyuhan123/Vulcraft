@@ -107,6 +107,16 @@ public class Renderer {
 
     private final List<Runnable> onResizeCallbacks = new ObjectArrayList<>();
 
+    /**
+     * GPU timestamp queries around the main render pass (one pool per frame
+     * slot; the slot's fence guarantees the results are complete by the time
+     * the slot is re-acquired). Feeds FrameProfiler's gpuPass metric so real
+     * GPU pass time shows up in the [VKPROF] report without RenderDoc.
+     */
+    private static final int GPU_QUERY_COUNT = 2;
+    private long[] gpuQueryPools;
+    private double timestampPeriodNanos;
+
     public Renderer() {
         device = Vulkan.getVkDevice();
         framesNum = 3;
@@ -136,6 +146,59 @@ public class Renderer {
 
         allocateCommandBuffers();
         createSyncObjects();
+        createGpuQueryPools();
+    }
+
+    private void createGpuQueryPools() {
+        this.timestampPeriodNanos = DeviceManager.deviceProperties.limits().timestampPeriod();
+
+        this.gpuQueryPools = new long[framesNum];
+
+        try (MemoryStack stack = stackPush()) {
+            VkQueryPoolCreateInfo poolInfo = VkQueryPoolCreateInfo.calloc(stack);
+            poolInfo.sType(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
+            poolInfo.queryType(VK_QUERY_TYPE_TIMESTAMP);
+            poolInfo.queryCount(GPU_QUERY_COUNT);
+
+            LongBuffer pPool = stack.mallocLong(1);
+
+            for (int i = 0; i < framesNum; ++i) {
+                if (vkCreateQueryPool(device, poolInfo, null, pPool) != VK_SUCCESS) {
+                    throw new RuntimeException("Failed to create GPU timestamp query pool " + i);
+                }
+
+                this.gpuQueryPools[i] = pPool.get(0);
+            }
+        }
+    }
+
+    /** Reads the finished timestamp pair of this frame slot (fence already signaled). */
+    private void fetchGpuPassNanos(int frameSlot) {
+        if (this.gpuQueryPools == null) {
+            return;
+        }
+
+        try (MemoryStack stack = stackPush()) {
+            LongBuffer results = stack.mallocLong(GPU_QUERY_COUNT);
+            // No WAIT_BIT here: on the very first use of a slot (or after skipped
+            // frames) the pool was never written and a blocking fetch would hang
+            // the game before the first frame. The fence only guarantees results
+            // when the slot's last submission actually recorded the queries, so
+            // VK_NOT_READY is a normal "nothing to report" and just skips.
+            int result = vkGetQueryPoolResults(device, this.gpuQueryPools[frameSlot], 0, GPU_QUERY_COUNT,
+                    results, Long.BYTES, VK_QUERY_RESULT_64_BIT);
+            if (result != VK_SUCCESS) {
+                return;
+            }
+
+            long startTicks = results.get(0);
+            long endTicks = results.get(1);
+            if (endTicks <= startTicks) {
+                return;
+            }
+
+            FrameProfiler.onGpuPassNanos((long) ((endTicks - startTicks) * this.timestampPeriodNanos));
+        }
     }
 
     private void allocateCommandBuffers() {
@@ -260,6 +323,10 @@ public class Renderer {
         vkWaitForFences(device, inFlightFences.get(currentFrame), true, VUtil.UINT64_MAX);
         FrameProfiler.endFenceWait();
 
+        // The fence above guarantees this frame slot's previous command buffer
+        // finished, so its timestamp pair is ready to be read.
+        fetchGpuPassNanos(currentFrame);
+
         // This frame slot's staging buffer was filled the last time this slot
         // rendered (3 frames ago). Its upload batch was submitted BEFORE the
         // fence we just waited on, on the same queue, so the GPU is guaranteed
@@ -339,6 +406,9 @@ public class Renderer {
         recordingCmds = true;
         mainPass.begin(commandBuffer, stack);
 
+        vkCmdResetQueryPool(commandBuffer, gpuQueryPools[currentFrame], 0, GPU_QUERY_COUNT);
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuQueryPools[currentFrame], 0);
+
         resetDynamicState(commandBuffer);
     }
 
@@ -350,6 +420,10 @@ public class Renderer {
 
 //        Profiler p = Profiler.getMainProfiler();
 //        p.push("End_rendering");
+
+        if (currentCmdBuffer != null && gpuQueryPools != null) {
+            vkCmdWriteTimestamp(currentCmdBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuQueryPools[currentFrame], 1);
+        }
 
         mainPass.end(currentCmdBuffer);
 

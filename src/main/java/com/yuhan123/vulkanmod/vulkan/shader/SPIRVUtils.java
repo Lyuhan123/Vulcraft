@@ -9,18 +9,16 @@ import org.lwjgl.util.shaderc.ShadercIncludeResultReleaseI;
 import org.lwjgl.vulkan.VK12;
 
 import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.net.URL;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.IntBuffer;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 
 import static org.lwjgl.system.MemoryUtil.NULL;
+import static org.lwjgl.system.MemoryUtil.memAlloc;
 import static org.lwjgl.system.MemoryUtil.memASCII;
+import static org.lwjgl.system.MemoryUtil.memFree;
+import static org.lwjgl.system.MemoryUtil.memUTF8;
 import static org.lwjgl.util.shaderc.Shaderc.*;
 
 public class SPIRVUtils {
@@ -68,10 +66,11 @@ public class SPIRVUtils {
     }
 
     public static void addIncludePath(String path) {
-        URL url = SPIRVUtils.class.getResource(path);
-
-        if (url != null)
-            includePaths.add(url.toExternalForm());
+        // Store the classpath root verbatim. Includes are resolved through the
+        // classloader (getResourceAsStream), which works whether the mod is
+        // exploded on disk (dev) or packed inside the mod jar (production) --
+        // Paths.get(new URI(jar:...)) is unavailable there.
+        includePaths.add(path);
     }
 
     public static SPIRV compileShader(String filename, String source, ShaderKind shaderKind) {
@@ -180,43 +179,58 @@ public class SPIRVUtils {
 
     private static class ShaderIncluder implements ShadercIncludeResolveI {
 
-        private static final int MAX_PATH_LENGTH = 4096; //Maximum Linux/Unix Path Length
-
         @Override
         public long invoke(long user_data, long requested_source, int type, long requesting_source, long include_depth) {
-            var requesting = memASCII(requesting_source);
-            var requested = memASCII(requested_source);
+            String requesting = memUTF8(requesting_source);
+            String requested = memUTF8(requested_source);
 
-            try (MemoryStack stack = MemoryStack.stackPush()) {
-                Path path;
-
-                for (String includePath : includePaths) {
-                    path = Paths.get(new URI(String.format("%s%s", includePath, requested)));
-
-                    if (Files.exists(path)) {
-                        byte[] bytes = Files.readAllBytes(path);
-
-                        return ShadercIncludeResult.malloc(stack)
-                                                   .source_name(stack.ASCII(requested))
-                                                   .content(stack.bytes(bytes))
-                                                   .user_data(user_data).address();
+            // Resolve the requested include against each registered classpath
+            // root. getResourceAsStream works both exploded-on-disk (dev) and
+            // inside the mod jar (production), unlike Paths.get(new URI(...)).
+            for (String includePath : includePaths) {
+                try (InputStream is = SPIRVUtils.class.getResourceAsStream(includePath + requested)) {
+                    if (is == null) {
+                        continue;
                     }
+
+                    byte[] bytes = is.readAllBytes();
+
+                    // IMPORTANT: allocate on the HEAP, not a MemoryStack. shaderc
+                    // retains these pointers and only releases them via the
+                    // ShaderReleaser callback -- which fires *after* this method
+                    // returns and the compile that requested the include has
+                    // finished. A stack-allocated result would be freed the
+                    // instant we return, leaving shaderc with dangling pointers
+                    // and an EXCEPTION_ACCESS_VIOLATION deep inside shaderc.dll.
+                    ByteBuffer content = memAlloc(bytes.length);
+                    content.put(bytes).flip();
+
+                    ShadercIncludeResult result = ShadercIncludeResult.malloc()
+                            .source_name(memASCII(requested))
+                            .content(content)
+                            .user_data(user_data);
+
+                    return result.address();
+                } catch (IOException ignored) {
+                    // try the next include root
                 }
-            } catch (IOException | URISyntaxException e) {
-                throw new RuntimeException(e);
             }
 
-            throw new RuntimeException(String.format("%s: Unable to find %s in include paths", requesting, requested));
+            throw new RuntimeException(requesting + ": Unable to find " + requested + " in include paths");
         }
     }
 
-    //TODO: Don't actually need the Releaser at all, (MemoryStack frees this for us)
-    //But ShaderC won't let us create the Includer without a corresponding Releaser, (so we need it anyway)
+    // shaderc calls this once it no longer needs an include result, i.e. after
+    // the compile that requested it has finished. Free the heap allocations we
+    // made in ShaderIncluder so we don't leak native memory.
     private static class ShaderReleaser implements ShadercIncludeResultReleaseI {
 
         @Override
         public void invoke(long user_data, long include_result) {
-            //TODO:Maybe dump Shader Compiled Binaries here to a .Misc Diretcory to allow easy caching.recompilation...
+            ShadercIncludeResult result = ShadercIncludeResult.create(include_result);
+            memFree(result.content());
+            memFree(result.source_name());
+            result.free();
         }
     }
 

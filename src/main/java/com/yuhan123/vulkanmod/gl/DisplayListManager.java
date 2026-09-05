@@ -71,7 +71,7 @@ public class DisplayListManager {
         return recording;
     }
 
-    private static int dlLogs = 0;
+//    private static int dlLogs = 0;
 
     public static void startList(int glId) {
         int internalId = nextInternalId++;
@@ -85,10 +85,10 @@ public class DisplayListManager {
         recording = true;
         recordingStartMV.set(VRenderSystem.modelViewFloatBuffer());
         recordingData.clear();
-        if (dlLogs < 8) {
-            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[DLDBG] startList glId={} internal={}", glId, internalId);
-            dlLogs++;
-        }
+//        if (dlLogs < 8) {
+//            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[DLDBG] startList glId={} internal={}", glId, internalId);
+//            dlLogs++;
+//        }
     }
 
     public static void endList() {
@@ -106,18 +106,18 @@ public class DisplayListManager {
     public static void replayList(int glId) {
         Integer internalId = glToInternal.get(glId);
         if (internalId == null) {
-            if (dlLogs < 8) {
-                com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[DLDBG] replayList glId={} -> NOT FOUND", glId);
-                dlLogs++;
-            }
+//            if (dlLogs < 8) {
+//                com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[DLDBG] replayList glId={} -> NOT FOUND", glId);
+//                dlLogs++;
+//            }
             return;
         }
         DisplayList list = displayLists.get(internalId);
-        if (dlLogs < 8) {
-            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[DLDBG] replayList glId={} internal={} draws={}",
-                    glId, internalId, list != null ? list.draws.size() : -1);
-            dlLogs++;
-        }
+//        if (dlLogs < 8) {
+//            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[DLDBG] replayList glId={} internal={} draws={}",
+//                    glId, internalId, list != null ? list.draws.size() : -1);
+//            dlLogs++;
+//        }
         if (list != null) {
             VertexBuffer vb = list.vertexBuffer;
             for (CapturedDraw draw : list.draws) {
@@ -171,7 +171,7 @@ public class DisplayListManager {
         list.draws.add(new CapturedDraw(byteOffset, count, mode, vertexFormat, relative, shader));
     }
 
-    private static int replayLogs = 0;
+//    private static int replayLogs = 0;
 
     private static void replayDraw(VertexBuffer vertexBuffer, CapturedDraw draw) {
         ShaderInstance shader = draw.shader;
@@ -186,12 +186,12 @@ public class DisplayListManager {
         SCRATCH_MVP.set(SCRATCH_MV).mul(relative);
         SCRATCH_PROJ.mul(SCRATCH_MVP);
 
-        if (replayLogs < 4) {
-            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[RPYDBG] count={} mode={} fmt={} curMV[3]={} rel[3]={} mvp[3]={}",
-                    draw.vertexCount, draw.mode, draw.vertexFormat,
-                    SCRATCH_MV.m30(), relative.m30(), SCRATCH_PROJ.m30());
-            replayLogs++;
-        }
+//        if (repla;yLogs < 4) {
+//                com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[RPYDBG] count={} mode={} fmt={} curMV[3]={} rel[3]={} mvp[3]={}",
+//                        draw.vertexCount, draw.mode, draw.vertexFormat,
+//                        SCRATCH_MV.m30(), relative.m30(), SCRATCH_PROJ.m30());
+//                replayLogs++
+//        }
 
         // Temporarily override the MVP uniform source for this draw. The MVP is
         // computed lazily, so writing it here and marking it clean is enough -

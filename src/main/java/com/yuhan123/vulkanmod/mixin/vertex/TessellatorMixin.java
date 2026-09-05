@@ -17,16 +17,16 @@ import java.nio.ByteBuffer;
 @Mixin(Tessellator.class)
 public class TessellatorMixin {
 
-    private static int vkDrawLogs = 0;
-
+//    private static int vkDrawLogs = 0;
+//
     @Redirect(method = "draw", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/WorldVertexBufferUploader;draw(Lnet/minecraft/client/renderer/BufferBuilder;)V"))
     public void vkDraw(WorldVertexBufferUploader uploader, BufferBuilder buffer) {
         int vertexCount = buffer.getVertexCount();
-        if (vkDrawLogs < 16 && vertexCount > 0) {
-            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[VKDBG] vkDraw count={} mode={} fmt={}",
-                    vertexCount, buffer.getDrawMode(), buffer.getVertexFormat());
-            vkDrawLogs++;
-        }
+//        if (vkDrawLogs < 16 && vertexCount > 0) {
+//            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[VKDBG] vkDraw count={} mode={} fmt={}",
+//                    vertexCount, buffer.getDrawMode(), buffer.getVertexFormat());
+//            vkDrawLogs++;
+//        }
         if (vertexCount <= 0)
             return;
 

@@ -446,7 +446,13 @@ public class ShaderInstance {
 //        RenderSystem.setupShaderLights((ShaderInstance) (Object) this);
     }
 
-    private void bindPipeline() {
+    /**
+     * Re-evaluates {@link PipelineState} and binds the matching pipeline handle.
+     * Public so the depth-prepass flow can re-bind between its two passes
+     * (colorMask=0 depth write, then EQUAL + depthMask off colour) without
+     * going through a full uniform apply.
+     */
+    public void bindPipeline() {
         if (this.pipeline == null) {
             throw new NullPointerException("Shader %s has no initialized pipeline".formatted(this.name));
         }
@@ -455,6 +461,21 @@ public class ShaderInstance {
         renderer.bindGraphicsPipeline(pipeline);
         VTextureSelector.bindShaderTextures(pipeline);
         renderer.uploadAndBindUBOs(pipeline);
+    }
+
+    /**
+     * Re-binds ONLY the vkCmdBindPipeline for this shader's pipeline, without
+     * re-uploading uniforms or re-binding descriptor sets / textures. Used by
+     * the depth-prepass flow: apply() has just bound the descriptor sets and
+     * the pipeline layout is unchanged, so a state-keyed pipeline switch needs
+     * nothing else.
+     */
+    public void rebindPipelineOnly() {
+        if (this.pipeline == null) {
+            throw new NullPointerException("Shader %s has no initialized pipeline".formatted(this.name));
+        }
+
+        Renderer.getInstance().bindGraphicsPipeline(this.pipeline);
     }
 
     public void setupUniformSuppliers(UBO ubo) {
@@ -562,8 +583,7 @@ public class ShaderInstance {
             this.pipeline = builder.createGraphicsPipeline();
             this.doUniformUpdate = true;
         } catch (Exception e) {
-            VulkanMod.LOGGER.error("Error on shader {} conversion/compilation", this.name);
-            e.printStackTrace();
+            VulkanMod.LOGGER.error("Error on shader {} conversion/compilation", this.name, e);
         }
     }
 

@@ -17,7 +17,7 @@ public class TextureUtilMixin {
     /**
      * @author
      */
-    @Overwrite(remap = false)
+    @Overwrite
     public static int glGenTextures() {
         //RenderSystem.assertOnRenderThread();
         return VkGlTexture.genTextureId();

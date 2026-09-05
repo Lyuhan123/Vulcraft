@@ -13,7 +13,7 @@ public class PipelineState {
 
     public static BlendInfo blendInfo = PipelineState.defaultBlendInfo();
 
-    public static final PipelineState DEFAULT = new PipelineState(getAssemblyRasterState(), getBlendState(), getDepthState(), getLogicOpState(), VRenderSystem.getColorMask(), null);
+    public static final PipelineState DEFAULT = new PipelineState(getAssemblyRasterState(), getBlendState(), getDepthState(), getLogicOpState(), VRenderSystem.getColorMask(), VRenderSystem.alphaTest, null);
 
     public static PipelineState currentState = DEFAULT;
 
@@ -23,11 +23,12 @@ public class PipelineState {
         int currentColorMask = VRenderSystem.getColorMask();
         int depthState = getDepthState();
         int logicOp = getLogicOpState();
+        boolean alphaTest = VRenderSystem.alphaTest;
 
-        if (currentState.checkEquals(assemblyRasterState, blendState, depthState, logicOp, currentColorMask, renderPass))
+        if (currentState.checkEquals(assemblyRasterState, blendState, depthState, logicOp, currentColorMask, alphaTest, renderPass))
             return currentState;
         else
-            return currentState = new PipelineState(assemblyRasterState, blendState, depthState, logicOp, currentColorMask, renderPass);
+            return currentState = new PipelineState(assemblyRasterState, blendState, depthState, logicOp, currentColorMask, alphaTest, renderPass);
     }
 
     public static int getBlendState() {
@@ -66,6 +67,7 @@ public class PipelineState {
     int depthState_i;
     int colorMask_i;
     int logicOp_i;
+    boolean alphaTest_i;
 
     /**
      * Precomputed hash. The state fields are immutable, and the pipeline lookup
@@ -76,7 +78,7 @@ public class PipelineState {
     private final int hash;
 
     public PipelineState(int assemblyRasterState, int blendState, int depthState, int logicOp, int colorMask,
-                         RenderPass renderPass) {
+                         boolean alphaTest, RenderPass renderPass) {
         this.renderPass = renderPass;
 
         this.assemblyRasterState = assemblyRasterState;
@@ -84,6 +86,7 @@ public class PipelineState {
         this.depthState_i = depthState;
         this.colorMask_i = colorMask;
         this.logicOp_i = logicOp;
+        this.alphaTest_i = alphaTest;
 
         int h = 1;
         h = 31 * h + blendState;
@@ -91,16 +94,38 @@ public class PipelineState {
         h = 31 * h + logicOp;
         h = 31 * h + assemblyRasterState;
         h = 31 * h + colorMask;
+        h = 31 * h + (alphaTest ? 1 : 0);
         h = 31 * h + (renderPass != null ? renderPass.hashCode() : 0);
         this.hash = h;
     }
 
+    /** GL fixed-function alpha test enable bit at draw time (see VRenderSystem.alphaTest). */
+    public boolean alphaTest() {
+        return this.alphaTest_i;
+    }
+
+    /** Packed VK color-component write mask at draw time. */
+    public int colorMask() {
+        return this.colorMask_i;
+    }
+
+    /** Depth-write enable at draw time (depthMask). */
+    public boolean depthMask() {
+        return DepthState.depthMask(this.depthState_i);
+    }
+
+    /** True when the depth compare op is VK_COMPARE_OP_EQUAL. */
+    public boolean depthEqual() {
+        return DepthState.decodeDepthFun(this.depthState_i) == VK_COMPARE_OP_EQUAL;
+    }
+
     private boolean checkEquals(int assemblyRasterState, int blendState, int depthState, int logicOp, int colorMask,
-                                RenderPass renderPass) {
+                                boolean alphaTest, RenderPass renderPass) {
         return (blendState == this.blendState_i) && (depthState == this.depthState_i)
                && renderPass == this.renderPass && logicOp == this.logicOp_i
                && (assemblyRasterState == this.assemblyRasterState)
-               && colorMask == this.colorMask_i;
+               && colorMask == this.colorMask_i
+               && alphaTest == this.alphaTest_i;
     }
 
     @Override
@@ -114,7 +139,8 @@ public class PipelineState {
         return (blendState_i == that.blendState_i) && (depthState_i == that.depthState_i)
                && this.renderPass == that.renderPass && logicOp_i == that.logicOp_i
                && this.assemblyRasterState == that.assemblyRasterState
-               && this.colorMask_i == that.colorMask_i;
+               && this.colorMask_i == that.colorMask_i
+               && this.alphaTest_i == that.alphaTest_i;
     }
 
     @Override

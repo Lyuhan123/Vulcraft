@@ -1,35 +1,49 @@
 package com.yuhan123.vulkanmod.mixin.gui;
 
+import com.yuhan123.vulkanmod.VulkanMod;
 import net.minecraft.client.gui.GuiMainMenu;
-import org.lwjgl.opengl.ContextCapabilities;
+import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.world.WorldSettings;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Overwrite;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(GuiMainMenu.class)
-public class GuiMainMenuMixin {
-//
-//    @Redirect(method = "<init>", at = @At(value = "FIELD", target = "Lorg/lwjgl/opengl/ContextCapabilities;OpenGL20:Z"))
-//    public boolean gl20(ContextCapabilities instance) {
-//        return false;
-//    }
-//
-//    @Redirect(method = "<init>", at = @At(value = "INVOKE", target = "Lorg/lwjgl/opengl/GLContext;getCapabilities()Lorg/lwjgl/opengl/ContextCapabilities;"))
-//    public ContextCapabilities context() {
-//        return null;
-//    }
-//
-//    @Redirect(method = "<init>", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/OpenGlHelper;areShadersSupported()Z"))
-//    public boolean areShadersSupported() {
-//        return false;
-//    }
-//
-//    /**
-//     * The Vulkan port does not support the panorama blur FBO path yet;
-//     * skip the skybox so the menu still renders (gradient + logo + buttons).
-//     */
-//    @Overwrite(remap = false)
-//    private void renderSkybox(int p_73971_1_, int p_73971_2_, float p_73971_3_) {
-//    }
+public abstract class GuiMainMenuMixin extends GuiScreen {
+
+    /**
+     * Headless-bench hook: with VULKANMOD_AUTOJOIN=1, load the "New World" save
+     * 4 seconds after the main menu appears so automated runClient measurements
+     * reach an in-world scene without manual interaction. No-op otherwise.
+     */
+    @Unique
+    private static boolean vulkanmod$autoJoinFired = false;
+    @Unique
+    private long vulkanmod$shownAt;
+
+    @Inject(method = "initGui", at = @At("TAIL"))
+    private void vulkanmod$recordShown(CallbackInfo ci) {
+        this.vulkanmod$shownAt = System.currentTimeMillis();
+    }
+
+    @Inject(method = "drawScreen", at = @At("TAIL"))
+    private void vulkanmod$autoJoin(CallbackInfo ci) {
+        if (vulkanmod$autoJoinFired || !"1".equals(System.getenv("VULKANMOD_AUTOJOIN"))) {
+            return;
+        }
+
+        if (this.vulkanmod$shownAt == 0) {
+            this.vulkanmod$shownAt = System.currentTimeMillis();
+        }
+
+        if (System.currentTimeMillis() - this.vulkanmod$shownAt < 4_000) {
+            return;
+        }
+
+        vulkanmod$autoJoinFired = true;
+        VulkanMod.LOGGER.info("[VKPROF] auto-joining save 'New World'");
+        this.mc.launchIntegratedServer("New World", "New World", (WorldSettings) null);
+    }
 }

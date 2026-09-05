@@ -5,6 +5,7 @@ import net.minecraft.client.renderer.vertex.VertexFormatElement;
 import it.unimi.dsi.fastutil.objects.Object2LongMap;
 import it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap;
 //import com.yuhan123.vulkanmod.interfaces.VertexFormatMixed;
+import com.yuhan123.vulkanmod.VulkanMod;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
 import com.yuhan123.vulkanmod.vulkan.Vulkan;
 import com.yuhan123.vulkanmod.vulkan.device.DeviceManager;
@@ -29,6 +30,29 @@ public class GraphicsPipeline extends Pipeline {
     private long vertShaderModule = 0;
     private long fragShaderModule = 0;
 
+    /**
+     * Discard-free fragment variant (may be 0 when the fragment shader contains
+     * no discard). Selected whenever the GL alpha-test state is disabled so the
+     * pipeline keeps early-Z fragment rejection instead of paying full fragment
+     * shading for overdrawn terrain.
+     */
+    private long fragShaderModuleNoDiscard = 0;
+
+    /**
+     * early_fragment_tests variant (discard retained). Selected for the cutout
+     * colour pass of the depth-prepass flow (alpha test on + depthMask off +
+     * EQUAL compare): the prepass already wrote depth, so early tests reject
+     * overdrawn fragments before the shader runs.
+     */
+    private long fragShaderModuleEarlyTest = 0;
+
+    /**
+     * Depth-only fragment variant (alpha discard with a single fetch). Selected
+     * for the depth-prepass pass (colorMask=0): writes the nearest depth for
+     * the alpha-tested geometry at a fraction of the full shader's cost.
+     */
+    private long fragShaderModuleDepthOnly = 0;
+
     GraphicsPipeline(Builder builder) {
         super(builder.shaderPath);
         this.buffers = builder.UBOs;
@@ -39,7 +63,8 @@ public class GraphicsPipeline extends Pipeline {
 
         createDescriptorSetLayout();
         createPipelineLayout();
-        createShaderModules(builder.vertShaderSPIRV, builder.fragShaderSPIRV);
+        createShaderModules(builder.vertShaderSPIRV, builder.fragShaderSPIRV,
+                builder.fragNoDiscardSPIRV, builder.fragEarlyTestSPIRV, builder.fragDepthOnlySPIRV);
 
         // Register only the vertex attributes the vertex shader actually consumes;
         // unused ones (e.g. the 1.12.2 lightmap UV2 slot) would otherwise trigger
@@ -75,6 +100,16 @@ public class GraphicsPipeline extends Pipeline {
     }
 
     private long createGraphicsPipeline(PipelineState state) {
+        long picked = pickFragModule(state);
+        VulkanMod.LOGGER.info(
+                "[VKPROF] create pipeline '{}': cMask=0x{} aTest={} dMask={} dEqual={} frag={} (depthOnly=0x{} early=0x{} noDiscard=0x{} normal=0x{})",
+                this.name, Integer.toHexString(state.colorMask_i), state.alphaTest(), state.depthMask(),
+                state.depthEqual(),
+                picked == fragShaderModuleDepthOnly && fragShaderModuleDepthOnly != 0 ? "DEPTHONLY"
+                        : picked == fragShaderModuleEarlyTest && fragShaderModuleEarlyTest != 0 ? "EARLY"
+                        : (picked == fragShaderModuleNoDiscard && fragShaderModuleNoDiscard != 0 ? "NODISCARD" : "NORMAL"),
+                fragShaderModuleDepthOnly, fragShaderModuleEarlyTest, fragShaderModuleNoDiscard, fragShaderModule);
+
         try (MemoryStack stack = stackPush()) {
             ByteBuffer entryPoint = stack.UTF8("main");
 
@@ -91,7 +126,7 @@ public class GraphicsPipeline extends Pipeline {
 
             fragShaderStageInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
             fragShaderStageInfo.stage(VK_SHADER_STAGE_FRAGMENT_BIT);
-            fragShaderStageInfo.module(fragShaderModule);
+            fragShaderStageInfo.module(pickFragModule(state));
             fragShaderStageInfo.pName(entryPoint);
 
             // ===> VERTEX STAGE <===
@@ -255,14 +290,73 @@ public class GraphicsPipeline extends Pipeline {
         }
     }
 
-    private void createShaderModules(SPIRVUtils.SPIRV vertSpirv, SPIRVUtils.SPIRV fragSpirv) {
+    private void createShaderModules(SPIRVUtils.SPIRV vertSpirv, SPIRVUtils.SPIRV fragSpirv,
+                                     SPIRVUtils.SPIRV fragNoDiscardSpirv, SPIRVUtils.SPIRV fragEarlyTestSpirv,
+                                     SPIRVUtils.SPIRV fragDepthOnlySpirv) {
         this.vertShaderModule = createShaderModule(vertSpirv.bytecode());
         this.fragShaderModule = createShaderModule(fragSpirv.bytecode());
+
+        if (fragNoDiscardSpirv != null) {
+            this.fragShaderModuleNoDiscard = createShaderModule(fragNoDiscardSpirv.bytecode());
+            VulkanMod.LOGGER.info("[VKPROF] early-Z fragment variant created for shader '{}'", this.name);
+        }
+
+        if (fragEarlyTestSpirv != null) {
+            this.fragShaderModuleEarlyTest = createShaderModule(fragEarlyTestSpirv.bytecode());
+        }
+
+        if (fragDepthOnlySpirv != null) {
+            this.fragShaderModuleDepthOnly = createShaderModule(fragDepthOnlySpirv.bytecode());
+        }
+    }
+
+    /**
+     * Picks the fragment module for a draw.
+     *
+     * 1. colorMask=0 + alpha test on -> the depth-prepass pass: the depth-only
+     *    shader (single fetch + discard) writes the nearest depth cheaply.
+     * 2. alpha test on + depthMask off -> the colour pass of the prepass flow:
+     *    the early_fragment_tests variant; overdrawn fragments are rejected by
+     *    the early LEQUAL test against the prepass depth before shading, and
+     *    discard afterwards cannot corrupt depth because writing is disabled.
+     * 3. alpha test off (vanilla disables it for the SOLID layer) -> the
+     *    discard-free variant restores early-Z; the discard statement would
+     *    otherwise be dead code that still forces late fragment tests.
+     * 4. anything else -> the full original shader.
+     */
+    private long pickFragModule(PipelineState state) {
+        if (this.fragShaderModuleDepthOnly != 0
+                && state.alphaTest() && state.colorMask() == 0) {
+            return this.fragShaderModuleDepthOnly;
+        }
+
+        if (this.fragShaderModuleEarlyTest != 0
+                && state.alphaTest() && !state.depthMask()) {
+            return this.fragShaderModuleEarlyTest;
+        }
+
+        if (this.fragShaderModuleNoDiscard != 0 && !state.alphaTest()) {
+            return this.fragShaderModuleNoDiscard;
+        }
+
+        return this.fragShaderModule;
     }
 
     public void cleanUp() {
         vkDestroyShaderModule(DeviceManager.vkDevice, vertShaderModule, null);
         vkDestroyShaderModule(DeviceManager.vkDevice, fragShaderModule, null);
+
+        if (fragShaderModuleNoDiscard != 0) {
+            vkDestroyShaderModule(DeviceManager.vkDevice, fragShaderModuleNoDiscard, null);
+        }
+
+        if (fragShaderModuleEarlyTest != 0) {
+            vkDestroyShaderModule(DeviceManager.vkDevice, fragShaderModuleEarlyTest, null);
+        }
+
+        if (fragShaderModuleDepthOnly != 0) {
+            vkDestroyShaderModule(DeviceManager.vkDevice, fragShaderModuleDepthOnly, null);
+        }
 
         vertexInputDescription.cleanUp();
 

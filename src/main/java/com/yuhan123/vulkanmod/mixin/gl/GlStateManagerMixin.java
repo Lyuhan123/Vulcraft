@@ -39,6 +39,13 @@ import org.spongepowered.asm.mixin.injection.Redirect;
 
 @Mixin(GlStateManager.class)
 public class GlStateManagerMixin {
+   /**
+    * Depth-prepass flow for cutout terrain. On by default; set
+    * VULKANMOD_PREPASS=0 to disable for A/B benchmarking.
+    */
+   private static final boolean PREPASS_ENABLED = !"0".equals(System.getenv("VULKANMOD_PREPASS"));
+   private static boolean PREPASS_LOGGED = false;
+
    private static int ptrStride = 0;
    private static int ptrPosOffset = -1;
    private static int ptrColorOffset = -1;
@@ -234,14 +241,17 @@ public class GlStateManagerMixin {
 
    @Overwrite
    public static void disableAlpha() {
+      VRenderSystem.alphaTest = false;
    }
 
    @Overwrite
    public static void enableAlpha() {
+      VRenderSystem.alphaTest = true;
    }
 
    @Overwrite
    public static void alphaFunc(int p_179092_0_, float p_179092_1_) {
+      VRenderSystem.alphaCutout = p_179092_1_;
    }
 
    @Overwrite
@@ -801,6 +811,59 @@ public class GlStateManagerMixin {
                         data = glBuffer.getData();
                         data.position(byteOffset);
                         com.yuhan123.vulkanmod.gl.DisplayListManager.captureDisplayListDraw(data, p_187439_0_, vertexFormat, p_187439_2_);
+                        return;
+                     }
+
+                     // Depth-prepass flow for cutout terrain (alpha test on + BLOCK
+                     // format = the cutout chunk layers). Pass 1 writes depth only
+                     // (colorMask off); pass 2 re-draws with EQUAL compare and
+                     // depthMask off, which routes the shader to the
+                     // early_fragment_tests variant so overdrawn fragments are
+                     // rejected before the fragment shader runs. Without this,
+                     // the discard-based alpha test forces late tests and every
+                     // overlapping foliage fragment pays full shading.
+                     // VULKANMOD_PREPASS=0 disables it for A/B benchmarking.
+                     // depthMask must be ON: for the translucent layer it is
+                     // already off, so the prepass would be a pure no-op draw
+                     // (writes neither colour nor depth) -- skip it and let the
+                     // single draw use the early_fragment_tests variant against
+                     // the opaque depth. NOTE: buildFormatFromPointers()
+                     // constructs a fresh VertexFormat per pointer state, so
+                     // identity comparison against DefaultVertexFormats.BLOCK
+                     // never matches -- compare by layout fingerprint instead.
+                     if (PREPASS_ENABLED && VRenderSystem.alphaTest && VRenderSystem.depthMask
+                           && vertexFormat.getSize() == DefaultVertexFormats.BLOCK.getSize()
+                           && vertexFormat.getElementCount() == DefaultVertexFormats.BLOCK.getElementCount()) {
+                        if (!PREPASS_LOGGED) {
+                           PREPASS_LOGGED = true;
+                           VulkanMod.LOGGER.info("[VKPROF] prepass double-draw path active");
+                        }
+
+                        int savedColorMask = VRenderSystem.colorMask;
+                        boolean savedDepthMask = VRenderSystem.depthMask;
+
+                        // Pass 1: depth only. The pipeline must be re-bound here:
+                        // apply() already bound the full-colorMask handle, and the
+                        // state change below is only picked up on the next bind.
+                        // rebindPipelineOnly() skips the uniform upload and
+                        // descriptor re-bind -- apply() just bound them and the
+                        // pipeline layout is unchanged.
+                        VRenderSystem.colorMask = 0;
+                        shader.rebindPipelineOnly();
+                        Renderer.getDrawer().drawPersistent(persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
+
+                        // Pass 2: colour. colorMask MUST be restored BEFORE this
+                        // bind -- otherwise the colour pass binds the colorMask=0
+                        // pipeline and the cutout geometry outputs nothing at all
+                        // (invisible leaves / grass). depthMask stays off so the
+                        // early_fragment_tests variant is selected and discard
+                        // cannot corrupt the prepass-written depth.
+                        VRenderSystem.colorMask = savedColorMask;
+                        VRenderSystem.depthMask = false;
+                        shader.rebindPipelineOnly();
+                        Renderer.getDrawer().drawPersistent(persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
+
+                        VRenderSystem.depthMask = savedDepthMask;
                         return;
                      }
 

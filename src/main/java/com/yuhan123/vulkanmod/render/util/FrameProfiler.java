@@ -36,8 +36,15 @@ public final class FrameProfiler {
     private static long vertexBytesCopied;
     private static long uniformBytes;
 
+    /** GPU timestamp delta across the main render pass, fed by Renderer's query pool. */
+    private static long gpuPassNanos;
+
+    /** Client game-logic tick time (Minecraft.runTick), split out of the cpu total. */
+    private static long gameTickNanos;
+
     private static long frameStart;
     private static long markStart;
+    private static long tickStart;
 
     private FrameProfiler() {
     }
@@ -120,6 +127,22 @@ public final class FrameProfiler {
             uniformBytes += bytes;
     }
 
+    /** Adds one GPU timestamp delta (nanoseconds) to the per-report accumulator. */
+    public static void onGpuPassNanos(long nanos) {
+        if (ENABLED)
+            gpuPassNanos += nanos;
+    }
+
+    public static void beginGameTick() {
+        if (ENABLED)
+            tickStart = System.nanoTime();
+    }
+
+    public static void endGameTick() {
+        if (ENABLED)
+            gameTickNanos += System.nanoTime() - tickStart;
+    }
+
     private static void report() {
         final double frameMs = totalNanos / 1e6 / frames;
         final double fenceMs = fenceWaitNanos / 1e6 / frames;
@@ -127,11 +150,13 @@ public final class FrameProfiler {
         final double cpuMs = frameMs - fenceMs;
         final double applyMs = shaderApplyNanos / 1e6 / frames;
         final double drawMs = drawRecordNanos / 1e6 / frames;
+        final double gpuMs = gpuPassNanos / 1e6 / frames;
+        final double tickMs = gameTickNanos / 1e6 / frames;
 
         VulkanMod.LOGGER.info(
-                "[VKPROF] fps={} frame={}ms (cpu={} fence={} submit={}) apply={} draw={} draws={} binds={} descUpd={} vbCopy={}MB ubo={}MB",
+                "[VKPROF] fps={} frame={}ms (cpu={} fence={} submit={} gpuPass={}ms tick={}ms) apply={} draw={} draws={} binds={} descUpd={} vbCopy={}MB ubo={}MB",
                 format(1000.0 / frameMs, 1), format(frameMs, 2), format(cpuMs, 2), format(fenceMs, 2),
-                format(submitMs, 2), format(applyMs, 2), format(drawMs, 2),
+                format(submitMs, 2), format(gpuMs, 2), format(tickMs, 2), format(applyMs, 2), format(drawMs, 2),
                 format(draws / (double) frames, 0), format(pipelineBinds / (double) frames, 0),
                 format(descriptorUpdates / (double) frames, 0),
                 format(vertexBytesCopied / 1048576.0 / frames, 2),
@@ -156,5 +181,7 @@ public final class FrameProfiler {
         descriptorUpdates = 0;
         vertexBytesCopied = 0;
         uniformBytes = 0;
+        gpuPassNanos = 0;
+        gameTickNanos = 0;
     }
 }

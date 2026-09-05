@@ -76,6 +76,16 @@ public abstract class VRenderSystem {
 
     public static float alphaCutout = 0.0f;
 
+    /**
+     * Mirrors the GL fixed-function alpha test enable bit (GL_ALPHA_TEST).
+     * Vanilla 1.12.2 toggles it per terrain layer (EntityRenderer.renderWorldPass:
+     * disableAlpha() before SOLID and TRANSLUCENT, enableAlpha() around the two
+     * CUTOUT layers). A fragment shader containing {@code discard} forces late
+     * fragment tests per the Vulkan spec, which kills early-Z overdraw rejection,
+     * so pipelines with a discard-free variant must key on this flag.
+     */
+    public static boolean alphaTest = false;
+
     private static boolean depthBiasEnabled = false;
     private static float depthBiasConstant = 0.0f;
     private static float depthBiasSlope = 0.0f;

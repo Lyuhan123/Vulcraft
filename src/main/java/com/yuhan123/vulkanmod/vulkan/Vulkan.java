@@ -84,17 +84,11 @@ public class Vulkan {
         String s;
         if ((messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) {
             s = "\u001B[31m" + callbackData.pMessageString();
-
-//            System.err.println("Stack dump:");
-//            Thread.dumpStack();
         } else {
             s = callbackData.pMessageString();
         }
 
         System.err.println(s);
-
-        if ((messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0)
-            System.nanoTime();
 
         return VK_FALSE;
     }
@@ -239,7 +233,7 @@ public class Vulkan {
         try {
             MemoryManager.getInstance().freeAllBuffers();
         } catch (Exception e) {
-            e.printStackTrace();
+            VulkanMod.LOGGER.error("Error freeing buffers during cleanup", e);
         }
 
         vmaDestroyAllocator(allocator);

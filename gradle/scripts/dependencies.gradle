@@ -57,21 +57,109 @@ dependencies {
 }
 project.ext.lwjglVersion = "3.4.1"
 project.ext.jomlVersion = "1.10.9"
-project.ext.lwjglNatives = "natives-windows"
+
+// Comma separated list of LWJGL native classifiers to bundle into the mod jar.
+// For a public release use: natives-windows,natives-windows-x86,natives-linux,natives-macos,natives-macos-arm64
+project.ext.lwjglNatives = (project.findProperty('lwjgl_natives') ?: 'natives-windows')
+    .split(',').collect { it.trim() }.findAll { !it.isEmpty() }
 
 repositories {
     mavenCentral()
 }
 
+/*
+ * LWJGL 3 / JOML dependency layout for Cleanroom 1.12.2
+ * =====================================================
+ *
+ * A dev workspace (unimined `runClient`) and a real Cleanroom install have
+ * DIFFERENT classpaths. This is the single biggest reason a mod runs in dev
+ * and dies on a normal client.
+ *
+ * Cleanroom 0.6.11-alpha ships, on every install (see its version.json):
+ *     org.lwjgl:lwjgl:3.4.1-unsafe      <-- note the "-unsafe" classifier
+ *     org.lwjgl:lwjgl-glfw:3.4.1
+ *     org.lwjgl:lwjgl-jemalloc:3.4.1
+ *     org.lwjgl:lwjgl-openal:3.4.1
+ *     org.lwjgl:lwjgl-opengl:3.4.1
+ *     org.lwjgl:lwjgl-stb:3.4.1
+ *     org.lwjgl:lwjgl-tinyfd:3.4.1
+ *     org.joml:joml:1.10.9
+ *     ... plus matching natives jars
+ *
+ * It does NOT ship:
+ *     org.lwjgl:lwjgl-vulkan    (used by com.yuhan123.vulkanmod.vulkan.*)
+ *     org.lwjgl:lwjgl-shaderc   (used by ...vulkan.shader.SPIRVUtils)
+ *     org.lwjgl:lwjgl-vma       (used by ...vulkan.memory.MemoryManager)
+ *
+ * In dev those three came from `implementation`, so unimined dropped them into
+ * run/client/mods as loose jars and FML injected them ("FML has found a
+ * non-mod file lwjgl-vulkan-3.4.1.jar in your mods directory..."). That is the
+ * ONLY reason dev works. A normal install has nowhere to get them from, so the
+ * mod dies with NoClassDefFoundError: org/lwjgl/vulkan/VK13 (etc.) the moment
+ * it touches Vulkan.
+ *
+ * Fix: declare them in the `contain` configuration. This template already turns
+ * `contain` into a jar-in-jar bundle: the jars are packed at the root of the
+ * mod jar and `ContainedDeps` / `NonModDeps: true` are written to the manifest.
+ * Cleanroom's LibraryManager.extractPacked() unpacks them into mods/<mcver>/
+ * and CleanroomModDiscoverer adds them to the LaunchClassLoader.
+ *
+ * DO NOT bundle org.lwjgl:lwjgl core. Cleanroom already provides the
+ * 3.4.1-unsafe build; shipping the plain 3.4.1 org.lwjgl.system next to it
+ * splits the package across two build variants and corrupts MemoryUtil /
+ * MemoryStack / PointerBuffer at runtime. That is why the transitive `lwjgl`
+ * core is excluded from every `contain` below.
+ *
+ * ---------------------------------------------------------------------------
+ * About src/main/java/org/lwjgl/  --  DO NOT DELETE
+ * ---------------------------------------------------------------------------
+ * That folder holds a verbatim subset of the LWJGL 3.4.1 sources
+ * (org.lwjgl.system.* plus BufferUtils / CLongBuffer / PointerBuffer /
+ * Version). It looks redundant, but it is load bearing:
+ *
+ *   com.cleanroommc:lwjglx (compileOnly, enable_lwjglx=true) re-implements the
+ *   LWJGL 2 API in the SAME package `org.lwjgl`. It therefore contains its own
+ *   org.lwjgl.PointerBuffer / BufferUtils, which shadow the LWJGL 3 ones on the
+ *   javac classpath. VulkanMod needs the LWJGL 3 flavour of those classes
+ *   (PointerBuffer.getByteBuffer(int,int) etc.); the LWJGL 2 shim does not have
+ *   them. Compiling the LWJGL 3 versions straight from source is what makes
+ *   them win, since javac always prefers a source file over a jar.
+ *
+ *   Removing that folder makes the build fail with ~25 "cannot find symbol"
+ *   errors on PointerBuffer. If you ever need to regenerate it, the files are
+ *   byte-identical to the ones in org.lwjgl:lwjgl:3.4.1:sources.
+ */
 dependencies {
-    implementation platform("org.lwjgl:lwjgl-bom:$lwjglVersion")
+    // ---- provided by Cleanroom: compile against them, never bundle ----------
+    // (compileOnly keeps them off the dev runtime too, so dev is forced to use
+    //  the very same lwjgl build a real install uses)
+    compileOnly platform("org.lwjgl:lwjgl-bom:$lwjglVersion")
+    compileOnly "org.lwjgl:lwjgl:$lwjglVersion:unsafe"
+    compileOnly "org.lwjgl:lwjgl-glfw:$lwjglVersion"
+    compileOnly "org.lwjgl:lwjgl-opengl:$lwjglVersion"
+    compileOnly "org.jspecify:jspecify:1.0.0"
 
-    implementation "org.lwjgl:lwjgl"
-    implementation "org.lwjgl:lwjgl-shaderc"
-    implementation "org.lwjgl:lwjgl-vma"
-    implementation "org.lwjgl:lwjgl-vulkan"
-    implementation "org.lwjgl:lwjgl::$lwjglNatives"
-    implementation "org.lwjgl:lwjgl-shaderc::$lwjglNatives"
-    implementation "org.lwjgl:lwjgl-vma::$lwjglNatives"
+    // JOML: Cleanroom ships exactly 1.10.9, so it needs no bundling either.
+    // Kept on `implementation` so the dev runtime keeps seeing it the same way
+    // it does today.
     implementation "org.joml:joml:${jomlVersion}"
+
+    // ---- NOT provided by Cleanroom: bundle as ContainedDeps -----------------
+    // Explicit versions on purpose: the BOM above only constrains `compileOnly`,
+    // and `contain` extends `implementation`, which would leave these unbounded.
+    ['lwjgl-vulkan', 'lwjgl-shaderc', 'lwjgl-vma'].each { module ->
+        contain("org.lwjgl:${module}:${lwjglVersion}") {
+            exclude group: 'org.lwjgl', module: 'lwjgl'
+        }
+    }
+
+    // natives for the modules above (vulkan has no native jar, it loads the
+    // system vulkan-1 loader at runtime)
+    lwjglNatives.each { nativeClassifier ->
+        ['lwjgl-shaderc', 'lwjgl-vma'].each { module ->
+            contain("org.lwjgl:${module}:${lwjglVersion}:${nativeClassifier}") {
+                transitive = false
+            }
+        }
+    }
 }
