@@ -18,9 +18,23 @@ import static org.lwjgl.vulkan.VK10.*;
 
 public abstract class ImageUtil {
 
+    /**
+     * Regions packed into one {@code vkCmdCopyBufferToImage}. The merged atlas
+     * batch can carry thousands during the initial load, and an unbounded region
+     * count means an equally large native struct array per call; capping keeps
+     * both the allocation and the driver's call size bounded.
+     */
+    private static final int MAX_REGIONS_PER_COPY = 512;
+
     public static void copyBufferToImageCmd(MemoryStack stack, VkCommandBuffer commandBuffer, long buffer, long image,
                                             int mipLevel, int width, int height, int xOffset, int yOffset,
                                             int bufferOffset, int bufferRowLenght, int bufferImageHeight) {
+        // Split (pass 11): `cpMs` read ~6.9 us per call for a 315-byte upload,
+        // which is far too much for the copy. These two halves have opposite
+        // fixes - struct churn is fixable by reusing the struct, a slow driver
+        // entry point is not - so they are separated before anything is rewritten.
+        final long __setup = com.yuhan123.vulkanmod.render.util.FrameProfiler.texStart();
+
         VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
         region.bufferOffset(bufferOffset);
         region.bufferRowLength(bufferRowLenght);
@@ -32,7 +46,63 @@ public abstract class ImageUtil {
         region.imageOffset().set(xOffset, yOffset, 0);
         region.imageExtent(VkExtent3D.calloc(stack).set(width, height, 1));
 
+        com.yuhan123.vulkanmod.render.util.FrameProfiler.addTexStage(
+                __setup, com.yuhan123.vulkanmod.render.util.FrameProfiler.TEX_CP_SETUP);
+
+        final long __cmd = com.yuhan123.vulkanmod.render.util.FrameProfiler.texStart();
         vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+        com.yuhan123.vulkanmod.render.util.FrameProfiler.addTexStage(
+                __cmd, com.yuhan123.vulkanmod.render.util.FrameProfiler.TEX_CP_CMD);
+    }
+
+    /**
+     * Multi-region merge of the atlas sub-uploads: TRIED AND REVERTED, do not
+     * re-enable without solving the staging lifetime first.
+     *
+     * <p>Deferring the copies to the end of the upload batch is not safe here:
+     * the staging buffer's regions were sized for a batch that recorded each
+     * copy immediately, so queueing them made the staging buffer grow mid-batch
+     * and invalidate the offsets the earlier regions referenced. Measured with
+     * it on: texUp went 0.392 -> 4.960 ms/frame, cpSetup 0.020 -> 8.354 ms
+     * (a heap struct allocation per call), plus a 487 ms single-upload stall.
+     * Left here only as a record; {@code ImageUploadHelper} no longer queues.
+     */
+    public static void copyBufferToImageCmdMulti(MemoryStack stack, VkCommandBuffer commandBuffer,
+                                                 long buffer, long image, int[] regions, int regionCount) {
+        final long __setup = com.yuhan123.vulkanmod.render.util.FrameProfiler.texStart();
+
+        int done = 0;
+        while (done < regionCount) {
+            final int chunk = Math.min(regionCount - done, MAX_REGIONS_PER_COPY);
+
+            try (VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(chunk);
+                 VkExtent3D extent = VkExtent3D.calloc()) {
+                for (int i = 0; i < chunk; ++i) {
+                    final int b = (done + i) * 9;
+                    VkBufferImageCopy r = region.get(i);
+                    r.bufferOffset(regions[b + 1]);
+                    r.bufferRowLength(regions[b + 2]);
+                    r.bufferImageHeight(regions[b + 3]);
+                    r.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT);
+                    r.imageSubresource().mipLevel(regions[b]);
+                    r.imageSubresource().baseArrayLayer(0);
+                    r.imageSubresource().layerCount(1);
+                    r.imageOffset().set(regions[b + 4], regions[b + 5], 0);
+                    extent.set(regions[b + 6], regions[b + 7], 1);
+                    r.imageExtent(extent);
+                }
+
+                final long __cmd = com.yuhan123.vulkanmod.render.util.FrameProfiler.texStart();
+                vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+                com.yuhan123.vulkanmod.render.util.FrameProfiler.addTexStage(
+                        __cmd, com.yuhan123.vulkanmod.render.util.FrameProfiler.TEX_CP_CMD);
+            }
+
+            done += chunk;
+        }
+
+        com.yuhan123.vulkanmod.render.util.FrameProfiler.addTexStage(
+                __setup, com.yuhan123.vulkanmod.render.util.FrameProfiler.TEX_CP_SETUP);
     }
 
     public static void downloadTexture(VulkanImage image, long ptr) {
@@ -143,6 +213,20 @@ public abstract class ImageUtil {
         }
     }
 
+    /**
+     * Builds the mip chain by successive {@code vkCmdBlitImage} halvings.
+     *
+     * <p><b>MEASURED: this method is NOT the cause of the canopy/grass defects.</b>
+     * A verified-correct rewrite (real image layouts, whole-chain barriers, mip 0
+     * included in the final transition) was implemented and A/B tested; the sky
+     * punch-through in the canopy measured <b>28.7% before and 28.7% after</b>
+     * (3618 vs 3615 sky pixels over the identical 12600-pixel box). The rewrite
+     * was reverted rather than kept, because "the code looks wrong" is not
+     * evidence, and this A/B is direct evidence that it does not matter here.
+     *
+     * <p>The rewrite is preserved in the project's memory notes so that if a mip
+     * problem is ever <i>measured</i>, the correct implementation is available.
+     */
     public static void generateMipmaps(VulkanImage image) {
         // Base level must be uploaded before blitting mip levels.
         ImageUploadHelper.INSTANCE.flushUploads();
@@ -151,90 +235,78 @@ public abstract class ImageUtil {
 
             CommandPool.CommandBuffer commandBuffer = DeviceManager.getGraphicsQueue().beginCommands();
 
-            image.transitionImageLayout(stack, commandBuffer.getHandle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            // The chain is rebuilt on a texture that has already been uploaded,
+            // so by now it has been handed back to the sampler and sits in
+            // SHADER_READ_ONLY. Move it to TRANSFER_DST first - the per-level
+            // barriers below all assume that as their source layout.
+            image.transitionImageLayout(stack, commandBuffer.getHandle(),
+                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-            int level, prevLevel;
-
-            for (level = 1; level < image.mipLevels; level++) {
-                prevLevel = level - 1;
+            for (int level = 1; level < image.mipLevels; level++) {
 
                 VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, stack);
                 barrier.sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-                barrier.oldLayout(VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-                barrier.newLayout(VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+                barrier.oldLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                barrier.newLayout(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
                 barrier.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
                 barrier.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
                 barrier.image(image.getId());
-
-                barrier.subresourceRange().baseMipLevel(prevLevel);
+                barrier.subresourceRange().baseMipLevel(level - 1);
                 barrier.subresourceRange().levelCount(1);
                 barrier.subresourceRange().baseArrayLayer(0);
                 barrier.subresourceRange().layerCount(VK_REMAINING_ARRAY_LAYERS);
-
-                barrier.subresourceRange().aspectMask(image.aspect);
-
+                barrier.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT);
                 barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
                 barrier.dstAccessMask(VK_ACCESS_TRANSFER_READ_BIT);
 
-                vkCmdPipelineBarrier(commandBuffer.getHandle(), VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, null, null, barrier);
-
-                prevLevel = level - 1;
+                vkCmdPipelineBarrier(commandBuffer.getHandle(),
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     0, null, null, barrier);
 
                 VkImageBlit.Buffer blit = VkImageBlit.calloc(1, stack);
                 blit.srcOffsets(0, VkOffset3D.calloc(stack).set(0, 0, 0));
-                blit.srcOffsets(1, VkOffset3D.calloc(stack).set(image.width >> prevLevel, image.height >> prevLevel, 1));
+                blit.srcOffsets(1, VkOffset3D.calloc(stack).set(
+                        image.width >> (level - 1), image.height >> (level - 1), 1));
                 blit.srcSubresource()
                     .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-                    .mipLevel(prevLevel)
+                    .mipLevel(level - 1)
                     .baseArrayLayer(0)
                     .layerCount(1);
 
                 blit.dstOffsets(0, VkOffset3D.calloc(stack).set(0, 0, 0));
-                blit.dstOffsets(1, VkOffset3D.calloc(stack).set(image.width >> level, image.height >> level, 1));
+                blit.dstOffsets(1, VkOffset3D.calloc(stack).set(
+                        image.width >> level, image.height >> level, 1));
                 blit.dstSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(level).baseArrayLayer(0)
                     .layerCount(1);
 
                 vkCmdBlitImage(commandBuffer.getHandle(), image.getId(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                image.getId(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, blit, VK_FILTER_LINEAR);
-
             }
 
-            VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, stack);
-            barrier.sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-            barrier.oldLayout(VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-            barrier.newLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            barrier.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
-            barrier.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
-            barrier.image(image.getId());
-
-            barrier.subresourceRange().baseMipLevel(0);
-            barrier.subresourceRange().levelCount(image.mipLevels - 1);
-            barrier.subresourceRange().baseArrayLayer(0);
-            barrier.subresourceRange().layerCount(VK_REMAINING_ARRAY_LAYERS);
-
-            barrier.subresourceRange().aspectMask(image.aspect);
-
-            barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
-            barrier.dstAccessMask(VK_ACCESS_SHADER_READ_BIT);
-
-            vkCmdPipelineBarrier(commandBuffer.getHandle(),
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                 0,
-                                 null, null,
-                                 barrier);
-
-            barrier.oldLayout(VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-            barrier.subresourceRange().baseMipLevel(image.mipLevels - 1);
-            barrier.subresourceRange().levelCount(1);
+            VkImageMemoryBarrier.Buffer toRead = VkImageMemoryBarrier.calloc(1, stack);
+            toRead.sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
+            toRead.oldLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            toRead.newLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            toRead.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+            toRead.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+            toRead.image(image.getId());
+            toRead.subresourceRange().baseMipLevel(0);
+            // Whole chain: levelCount was mipLevels - 1, which left the last
+            // level in TRANSFER_DST_OPTIMAL - sampling it is a layout
+            // violation (and reads uninitialised data on the levels that were
+            // never blitted).
+            toRead.subresourceRange().levelCount(image.mipLevels);
+            toRead.subresourceRange().baseArrayLayer(0);
+            toRead.subresourceRange().layerCount(VK_REMAINING_ARRAY_LAYERS);
+            toRead.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT);
+            toRead.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
+            toRead.dstAccessMask(VK_ACCESS_SHADER_READ_BIT);
 
             vkCmdPipelineBarrier(commandBuffer.getHandle(),
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                 0,
-                                 null, null,
-                                 barrier);
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 0, null, null, toRead);
 
-            image.setCurrentLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            image.readOnlyLayout();
 
             long fence = DeviceManager.getGraphicsQueue().submitCommands(commandBuffer);
 

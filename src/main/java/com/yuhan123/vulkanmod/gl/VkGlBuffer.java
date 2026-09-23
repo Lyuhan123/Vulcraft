@@ -207,6 +207,9 @@ public class VkGlBuffer {
 
         VertexBuffer old = this.vertexBuffer;
 
+        // The dedicated buffer is created even with the arena enabled: it costs
+        // one allocation per VBO (not per frame) and it is what the draw falls
+        // back to if the arena is full or the stride turns out to be unpoolable.
         try {
             VertexBuffer buffer = new VertexBuffer(size, MemoryTypes.HOST_MEM);
             buffer.copyBuffer(this.data, size);

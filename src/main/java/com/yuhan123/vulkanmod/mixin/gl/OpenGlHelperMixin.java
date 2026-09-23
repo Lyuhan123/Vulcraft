@@ -184,7 +184,12 @@ public class OpenGlHelperMixin {
      */
     @Overwrite
     public static void setLightmapTextureCoords(int target, float p_77475_1_, float p_77475_2_) {
-        // The lightmap coordinates are handled via the shader's lightmap texture
+        // 1.12.2 calls this per entity (RenderLivingBase.setBrightness) with the
+        // packed light value; fixed-function GL folds it into the lightmap via a
+        // texture matrix this port does not emulate. Capturing it is what lets the
+        // entity shaders sample the lightmap themselves - without it entities are
+        // drawn with no lightmap at all and come out full-bright.
+        com.yuhan123.vulkanmod.vulkan.VRenderSystem.setLightmapCoord(p_77475_1_, p_77475_2_);
     }
 
     /**

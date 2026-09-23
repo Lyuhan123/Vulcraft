@@ -1,6 +1,7 @@
 package com.yuhan123.vulkanmod.vulkan.texture;
 
 import com.yuhan123.vulkanmod.render.texture.ImageUploadHelper;
+import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
 import com.yuhan123.vulkanmod.vulkan.Vulkan;
 import com.yuhan123.vulkanmod.vulkan.memory.MemoryManager;
@@ -247,8 +248,10 @@ public class VulkanImage {
 
         srcPtr += ((long) rowLength * unpackSkipRows + unpackSkipPixels) * this.formatSize;
 
+        long __stg = FrameProfiler.texStart();
         stagingBuffer.align(this.formatSize);
         stagingBuffer.copyBuffer((int) uploadSize, srcPtr);
+        FrameProfiler.addTexStage(__stg, FrameProfiler.TEX_STG);
 
         long bufferId = stagingBuffer.getId();
         final int srcOffset = (int) (stagingBuffer.getOffset());
@@ -260,9 +263,14 @@ public class VulkanImage {
         // all re-upload every frame).
         CommandPool.CommandBuffer cmdBuffer = ImageUploadHelper.INSTANCE.getOrStartCommandBuffer();
         try (MemoryStack stack = stackPush()) {
+            long __bar = FrameProfiler.texStart();
             transferDstLayout(stack, cmdBuffer.getHandle());
+            FrameProfiler.addTexStage(__bar, FrameProfiler.TEX_BARRIER);
+
+            long __cp = FrameProfiler.texStart();
             ImageUtil.copyBufferToImageCmd(stack, cmdBuffer.getHandle(), bufferId, this.id, mipLevel, width, height, xOffset, yOffset,
                                            srcOffset, rowLength, height);
+            FrameProfiler.addTexStage(__cp, FrameProfiler.TEX_COPY);
         }
 
         // Move back to SHADER_READ_ONLY at the end of the upload batch, outside
@@ -406,12 +414,14 @@ public class VulkanImage {
         barrier.srcAccessMask(srcAccessMask);
         barrier.dstAccessMask(dstAccessMask);
 
+        long __c = FrameProfiler.start();
         vkCmdPipelineBarrier(commandBuffer,
                 sourceStage, destinationStage,
                 0,
                 null,
                 null,
                 barrier);
+        FrameProfiler.addCmd(FrameProfiler.CMD_PIPELINE_BARRIER, __c);
 
         image.currentLayout = newLayout;
     }

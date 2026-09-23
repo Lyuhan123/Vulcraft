@@ -81,6 +81,19 @@ public class Renderer {
     private Pipeline boundPipeline;
     private long boundPipelineHandle;
 
+    /**
+     * Pipeline whose vkCmdBindPipeline has been requested but not yet issued.
+     *
+     * The bind is deferred to the next draw (see {@link #flushPipelineBind()}) so
+     * that a state change occurring between the request and the draw coalesces.
+     * The depth-prepass flow calls apply() - which requests the full-colour
+     * handle - and then immediately changes colorMask/depthMask and requests the
+     * depth-only handle before drawing. Binding eagerly made every cutout chunk
+     * pay for three vkCmdBindPipeline calls where two suffice.
+     */
+    private GraphicsPipeline pendingPipeline;
+    private boolean pipelineBindPending;
+
     private Drawer drawer;
 
     private SwapChain swapChain;
@@ -102,6 +115,38 @@ public class Renderer {
     private static int lastReset = -1;
     private VkCommandBuffer currentCmdBuffer;
     private boolean recordingCmds = false;
+
+    /**
+     * Bumped whenever the recorded command buffer's binding state is no longer
+     * the one the draw path cached: a command buffer (re)begins recording, or the
+     * per-frame uniform buffer is rewound.
+     *
+     * Descriptor sets, vertex buffers and index buffers are command-buffer state,
+     * so caches that skip redundant binds must be invalidated at exactly these
+     * points. Consumers store the epoch they bound at and compare.
+     */
+    private static int bindingEpoch = 0;
+
+    /** Scratch for the per-draw push constant block, reused across draws. */
+    private ByteBuffer pushConstantScratch;
+
+    /**
+     * Shadow of the last push-constant payload, plus the identity of the pipeline
+     * and command-buffer epoch it was pushed in. Lets pushConstants() skip a
+     * re-push of identical bytes (see the method for why that is safe).
+     */
+    private ByteBuffer pushConstantShadow;
+    private int pushConstantShadowSize = -1;
+    private Pipeline pushConstantPipeline;
+    private int pushConstantEpoch = -1;
+
+    public static int getBindingEpoch() {
+        return bindingEpoch;
+    }
+
+    private static void invalidateBindingState() {
+        bindingEpoch++;
+    }
 
     MainPass mainPass;
 
@@ -327,6 +372,12 @@ public class Renderer {
         // finished, so its timestamp pair is ready to be read.
         fetchGpuPassNanos(currentFrame);
 
+        // Rebuild the mip chains of any texture uploaded last frame. Doing it
+        // here - rather than inside the upload - means the level-0 data it
+        // reads has actually reached the GPU, and it keeps the blit out of any
+        // render pass.
+        com.yuhan123.vulkanmod.gl.VkGlTexture.rebuildPendingMipmaps();
+
         // This frame slot's staging buffer was filled the last time this slot
         // rendered (3 frames ago). Its upload batch was submitted BEFORE the
         // fence we just waited on, on the same queue, so the GPU is guaranteed
@@ -403,11 +454,19 @@ public class Renderer {
             throw new RuntimeException("Failed to begin recording command buffer: %s".formatted(VkResult.decode(vkResult)));
         }
 
+        // A (re)begun command buffer has no bindings; every cached "already
+        // bound" state from the previous recording session is void.
+        invalidateBindingState();
+
         recordingCmds = true;
         mainPass.begin(commandBuffer, stack);
 
+        long __c1 = FrameProfiler.start();
         vkCmdResetQueryPool(commandBuffer, gpuQueryPools[currentFrame], 0, GPU_QUERY_COUNT);
+        FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __c1);
+        long __c2 = FrameProfiler.start();
         vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuQueryPools[currentFrame], 0);
+        FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __c2);
 
         resetDynamicState(commandBuffer);
     }
@@ -418,11 +477,11 @@ public class Renderer {
             return;
         }
 
-//        Profiler p = Profiler.getMainProfiler();
-//        p.push("End_rendering");
-
+        // Anything still deferred has to be recorded before the pass is closed.
         if (currentCmdBuffer != null && gpuQueryPools != null) {
+            long __c = FrameProfiler.start();
             vkCmdWriteTimestamp(currentCmdBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuQueryPools[currentFrame], 1);
+            FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __c);
         }
 
         mainPass.end(currentCmdBuffer);
@@ -479,7 +538,14 @@ public class Renderer {
 
             presentInfo.pImageIndices(stack.ints(imageIndex));
 
+            // Timed separately from vkQueueSubmit: this call can block on the
+            // presentation engine (vsync, driver frame pacing, a full queue of
+            // images), and that is not CPU work. Without splitting it out it lands
+            // in the report's "cpu" figure, which is defined as frame - fence, and
+            // makes a present-bound frame look CPU-bound.
+            FrameProfiler.beginPresent();
             vkResult = vkQueuePresentKHR(DeviceManager.getPresentQueue().queue(), presentInfo);
+            FrameProfiler.endPresent();
 
             if (vkResult == VK_ERROR_OUT_OF_DATE_KHR || vkResult == VK_SUBOPTIMAL_KHR || swapChainUpdate) {
                 swapChainUpdate = true;
@@ -541,6 +607,14 @@ public class Renderer {
         this.boundRenderPass = null;
         this.boundFramebuffer = null;
 
+        // A pipeline bind requested before the pass ended must not be flushed
+        // afterwards: flushPipelineBind() resolves the handle against
+        // boundRenderPass, and that pass is gone. Every draw re-requests the bind
+        // through apply() anyway, so dropping the pending request loses nothing.
+        // boundPipelineHandle is deliberately left alone so a draw that arrives
+        // without a fresh request behaves exactly as it did before deferral.
+        this.pipelineBindPending = false;
+
         VkGlFramebuffer.resetBoundFramebuffer();
     }
 
@@ -581,6 +655,8 @@ public class Renderer {
     }
 
     private void resetDescriptors() {
+        invalidateBindingState();
+
         for (Pipeline pipeline : usedPipelines) {
             pipeline.resetDescriptorPool(currentFrame);
         }
@@ -642,6 +718,9 @@ public class Renderer {
         createSyncObjects();
         this.mainPass.onResize();
 
+        // The cached PipelineStates reference the render pass that was just
+        // destroyed with the old swapchain.
+        PipelineState.clearStateCache();
         this.onResizeCallbacks.forEach(Runnable::run);
 //        ((WindowAccessor) (Object) Minecraft.getInstance().getWindow()).getEventHandler().resizeDisplay();
 
@@ -678,40 +757,160 @@ public class Renderer {
     }
 
     public void bindGraphicsPipeline(GraphicsPipeline pipeline) {
-        VkCommandBuffer commandBuffer = currentCmdBuffer;
+        // Record the intent only; the actual vkCmdBindPipeline is issued by
+        // flushPipelineBind() immediately before the next draw, so a state change
+        // between here and the draw coalesces into a single bind.
+        this.pendingPipeline = pipeline;
+        this.pipelineBindPending = true;
+        this.boundPipeline = pipeline;
 
-        PipelineState currentState = PipelineState.getCurrentPipelineState(boundRenderPass);
+        // Eager, and deliberately NOT part of the deferred bind: uploadAndBindUBOs
+        // writes this pipeline's descriptor sets out of its descriptor pool, so
+        // resetDescriptors() must reset that pool next frame even when the handle
+        // bind below is coalesced away.
+        addUsedPipeline(pipeline);
+    }
+
+    /**
+     * Issues the pending vkCmdBindPipeline, if any, and only when the handle the
+     * current render state resolves to is not already bound. Every draw path calls
+     * this immediately before recording its draw.
+     */
+    public void flushPipelineBind() {
+        if (!this.pipelineBindPending) {
+            return;
+        }
+        this.pipelineBindPending = false;
+
+        final GraphicsPipeline pipeline = this.pendingPipeline;
+        if (pipeline == null) {
+            return;
+        }
+
+        // Evaluated here rather than at request time so the state read is the one
+        // in effect at the draw.
+        //
+        // No render pass means there is nothing to resolve the state against
+        // (PipelineState carries the RenderPass, and a null one cannot produce a
+        // pipeline handle). A draw outside a render pass is invalid anyway; leave
+        // the previously bound handle alone rather than dereferencing null.
+        if (boundRenderPass == null) {
+            return;
+        }
+
+        final PipelineState currentState = PipelineState.getCurrentPipelineState(boundRenderPass);
         final long handle = pipeline.getHandle(currentState);
 
         if (boundPipelineHandle == handle) {
             return;
         }
 
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, handle);
+        long __c = FrameProfiler.start();
+        vkCmdBindPipeline(currentCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, handle);
+        FrameProfiler.addCmd(FrameProfiler.CMD_BIND_PIPELINE, __c);
         boundPipelineHandle = handle;
-        boundPipeline = pipeline;
-        addUsedPipeline(pipeline);
         FrameProfiler.onPipelineBind();
     }
 
     public void uploadAndBindUBOs(Pipeline pipeline) {
-        VkCommandBuffer commandBuffer = currentCmdBuffer;
-        pipeline.bindDescriptorSets(commandBuffer, currentFrame);
+        if (pipeline == null)
+            return;
+
+        // The per-draw matrix is a push constant now (see the shader JSONs), so
+        // it is re-pushed on every draw, while the descriptor sets below only
+        // change when the bound textures or the uniform values really change.
+        final boolean timed = com.yuhan123.vulkanmod.render.util.FrameProfiler.DETAILED_TIMING;
+
+        long __s = timed ? com.yuhan123.vulkanmod.render.util.FrameProfiler.start() : 0L;
+        pushConstants(pipeline);
+        if (timed) {
+            com.yuhan123.vulkanmod.render.util.FrameProfiler.addFullSegment(
+                    __s, com.yuhan123.vulkanmod.render.util.FrameProfiler.FULL_PUSH);
+        }
+
+        __s = timed ? com.yuhan123.vulkanmod.render.util.FrameProfiler.start() : 0L;
+        pipeline.bindDescriptorSets(currentCmdBuffer, currentFrame);
+        if (timed) {
+            com.yuhan123.vulkanmod.render.util.FrameProfiler.addFullSegment(
+                    __s, com.yuhan123.vulkanmod.render.util.FrameProfiler.FULL_DESC);
+        }
     }
 
     public void pushConstants(Pipeline pipeline) {
-        VkCommandBuffer commandBuffer = currentCmdBuffer;
-
         PushConstants pushConstants = pipeline.getPushConstants();
 
-        try (MemoryStack stack = stackPush()) {
-            ByteBuffer buffer = stack.malloc(pushConstants.getSize());
-            long ptr = MemoryUtil.memAddress0(buffer);
-            pushConstants.update(ptr);
+        if (pushConstants == null)
+            return;
 
-            nvkCmdPushConstants(commandBuffer, pipeline.getLayout(), VK_SHADER_STAGE_VERTEX_BIT, 0, pushConstants.getSize(), ptr);
+        final int size = pushConstants.getSize();
+
+        // Deliberately not a MemoryStack allocation: this runs once per draw call
+        // and terrain alone is thousands of draws per frame.
+        if (pushConstantScratch == null || pushConstantScratch.capacity() < size) {
+            if (pushConstantScratch != null) {
+                MemoryUtil.memFree(pushConstantScratch);
+            }
+            if (pushConstantShadow != null) {
+                MemoryUtil.memFree(pushConstantShadow);
+            }
+            pushConstantScratch = MemoryUtil.memAlloc(size);
+            // Shadow copy of the last pushed bytes, for the comparison below.
+            pushConstantShadow = MemoryUtil.memAlloc(size);
+            pushConstantShadowSize = -1;
         }
 
+        long ptr = MemoryUtil.memAddress0(pushConstantScratch);
+        pushConstants.update(ptr);
+
+        // Re-pushing byte-identical values is a no-op: push constants are
+        // command-buffer state, so the previous push is still in effect. Terrain
+        // draws several layers of the same chunk section back to back and every
+        // one of them carries the same MVP, so a large fraction of the per-frame
+        // pushes are redundant.
+        //
+        // Two guards, because skipping a push that was actually needed would be a
+        // silent transform bug:
+        //  - the epoch, because a (re)begun command buffer has no push-constant
+        //    state at all (see Renderer.getBindingEpoch), and
+        //  - the pipeline, because a different layout means a different range.
+        if (pushConstantEpoch == getBindingEpoch()
+                && pushConstantPipeline == pipeline
+                && pushConstantShadowSize == size
+                && memEquals(pushConstantShadow, ptr, size)) {
+            FrameProfiler.onPushConstantSkipped();
+            return;
+        }
+
+        long __c = FrameProfiler.start();
+        nvkCmdPushConstants(currentCmdBuffer, pipeline.getLayout(), VK_SHADER_STAGE_VERTEX_BIT, 0, size, ptr);
+        FrameProfiler.addCmd(FrameProfiler.CMD_PUSH_CONSTANTS, __c);
+        MemoryUtil.memCopy(ptr, MemoryUtil.memAddress0(pushConstantShadow), size);
+        pushConstantShadowSize = size;
+        pushConstantPipeline = pipeline;
+        pushConstantEpoch = getBindingEpoch();
+        FrameProfiler.onPushConstants();
+    }
+
+    /**
+     * Whole-word comparison of a native block against a ByteBuffer. The struct is
+     * a multiple of 4 bytes (mat4 here), but the tail loop keeps it correct for
+     * any size.
+     */
+    private static boolean memEquals(ByteBuffer shadow, long otherPtr, int size) {
+        final long shadowPtr = MemoryUtil.memAddress0(shadow);
+
+        int off = 0;
+        for (; off + 8 <= size; off += 8) {
+            if (VUtil.UNSAFE.getLong(shadowPtr + off) != VUtil.UNSAFE.getLong(otherPtr + off)) {
+                return false;
+            }
+        }
+        for (; off < size; ++off) {
+            if (VUtil.UNSAFE.getByte(shadowPtr + off) != VUtil.UNSAFE.getByte(otherPtr + off)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public Pipeline getBoundPipeline() {
@@ -821,7 +1020,9 @@ public class Renderer {
             pRect.baseArrayLayer(0);
             pRect.layerCount(1);
 
+            long __c = FrameProfiler.start();
             vkCmdClearAttachments(INSTANCE.currentCmdBuffer, pAttachments, pRect);
+            FrameProfiler.addCmd(FrameProfiler.CMD_CLEAR_ATTACHMENTS, __c);
         }
     }
 
@@ -858,7 +1059,9 @@ public class Renderer {
         viewport.minDepth(0.0f);
         viewport.maxDepth(1.0f);
 
+        long __c = FrameProfiler.start();
         vkCmdSetViewport(INSTANCE.currentCmdBuffer, 0, viewport);
+        FrameProfiler.addCmd(FrameProfiler.CMD_SET_VIEWPORT, __c);
     }
 
     public static void setScissor(int x, int y, int width, int height) {
@@ -872,10 +1075,12 @@ public class Renderer {
 
             VkRect2D.Buffer scissor = VkRect2D.malloc(1, stack);
             scissor.offset().set(x, framebufferHeight - (y + height));
-            scissor.extent().set(width, height);
+        scissor.extent().set(width, height);
 
-            vkCmdSetScissor(INSTANCE.currentCmdBuffer, 0, scissor);
-        }
+        long __c = FrameProfiler.start();
+        vkCmdSetScissor(INSTANCE.currentCmdBuffer, 0, scissor);
+        FrameProfiler.addCmd(FrameProfiler.CMD_SET_SCISSOR, __c);
+    }
     }
 
     public static void resetScissor() {
@@ -883,9 +1088,11 @@ public class Renderer {
             return;
 
         try (MemoryStack stack = stackPush()) {
-            VkRect2D.Buffer scissor = INSTANCE.boundFramebuffer.scissor(stack);
-            vkCmdSetScissor(INSTANCE.currentCmdBuffer, 0, scissor);
-        }
+        VkRect2D.Buffer scissor = INSTANCE.boundFramebuffer.scissor(stack);
+        long __c = FrameProfiler.start();
+        vkCmdSetScissor(INSTANCE.currentCmdBuffer, 0, scissor);
+        FrameProfiler.addCmd(FrameProfiler.CMD_SET_SCISSOR, __c);
+    }
     }
 
     public static void pushDebugSection(String s) {

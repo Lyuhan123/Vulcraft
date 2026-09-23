@@ -368,6 +368,13 @@ public class VkUniform {
         this.markDirty();
     }
 
+    /**
+     * Legacy per-uniform upload. Superseded by {@code ShaderInstance.bindPipeline()},
+     * which uploads and binds every UBO of the pipeline exactly once per draw.
+     * Calling this per uniform made each draw issue one redundant
+     * vkCmdBindDescriptorSets (plus a full UBO rewrite and a dynamic-offset bump)
+     * per declared uniform, so it is no longer invoked from the draw path.
+     */
     public void upload() {
         Renderer renderer = Renderer.getInstance();
         Pipeline boundPipeline = renderer.getBoundPipeline();

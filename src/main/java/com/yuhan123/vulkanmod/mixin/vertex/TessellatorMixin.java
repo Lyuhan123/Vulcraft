@@ -61,6 +61,14 @@ public class TessellatorMixin {
             return;
         }
 
+        // TEMPORARY: entity-pass draw probe - see TextureProbe.
+        if (com.yuhan123.vulkanmod.render.util.FrameProfiler.entLoopOpen()) {
+            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onEntityDraw(
+                    shader.getName() + "/direct",
+                    com.yuhan123.vulkanmod.gl.VkGlTexture.getBoundTextureId(),
+                    vertexCount, buffer.getDrawMode(), null);
+        }
+
         Renderer.getDrawer().draw(vertexData, buffer.getDrawMode(), vertexFormat, vertexCount);
     }
 }

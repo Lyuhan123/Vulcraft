@@ -16,12 +16,36 @@ public abstract class VTextureSelector {
 
     private static final int[] levels = new int[SIZE];
 
+    /**
+     * Bumped every time a sampler slot actually changes image.
+     *
+     * <p>The terrain batching path can fold a chunk section into an open
+     * {@code vkCmdDrawIndexedIndirect} batch without re-running
+     * {@code ShaderInstance.apply()} - the batch is one draw, so everything
+     * apply() would have established (pipeline, descriptor sets, textures) has
+     * to still be in effect. This counter is how it knows the sampler bindings
+     * have not moved since the batch was opened; without it a texture change
+     * between two sections would be silently ignored for the rest of the batch.
+     *
+     * <p>Only a real change counts. 1.12.2 re-binds the atlas texture constantly
+     * and a counter that bumped on every call would defeat the fast path for no
+     * reason.
+     */
+    private static int bindVersion;
+
+    public static int getBindVersion() {
+        return bindVersion;
+    }
+
     private static final VulkanImage whiteTexture = VulkanImage.createWhiteTexture();
 
     private static int activeTexture = 0;
 
     public static void bindTexture(VulkanImage texture) {
-        boundTextures[0] = texture;
+        if (boundTextures[0] != texture) {
+            boundTextures[0] = texture;
+            ++bindVersion;
+        }
     }
 
     public static void bindTexture(int i, VulkanImage texture) {
@@ -30,8 +54,11 @@ public abstract class VTextureSelector {
             return;
         }
 
-        boundTextures[i] = texture;
-        levels[i] = -1;
+        if (boundTextures[i] != texture || levels[i] != -1) {
+            boundTextures[i] = texture;
+            levels[i] = -1;
+            ++bindVersion;
+        }
     }
 
     public static void bindImage(int i, VulkanImage texture, int level) {
@@ -40,8 +67,11 @@ public abstract class VTextureSelector {
             return;
         }
 
-        boundTextures[i] = texture;
-        levels[i] = level;
+        if (boundTextures[i] != texture || levels[i] != level) {
+            boundTextures[i] = texture;
+            levels[i] = level;
+            ++bindVersion;
+        }
     }
 
     public static void uploadSubTexture(int mipLevel, int width, int height, int xOffset, int yOffset, int unpackSkipRows, int unpackSkipPixels, int unpackRowLength, ByteBuffer buffer) {
@@ -101,10 +131,17 @@ public abstract class VTextureSelector {
                 image = state.imageIdx == 2 ? getWhiteTexture() : resolveMissingImage();
             }
 
+            // TEMPORARY: lightmap-slot probe - see TextureProbe.
+            if (state.imageIdx == 2) {
+                TextureProbe.onLightmapBind(image, image == getWhiteTexture());
+            }
+
             if (image != null) {
                 VTextureSelector.bindTexture(state.imageIdx, image);
             }
         }
+
+        TextureProbe.onPipelineBind(pipeline, imageDescriptors);
     }
 
     public static VulkanImage getImage(int i) {
@@ -112,11 +149,17 @@ public abstract class VTextureSelector {
     }
 
     public static void setLightTexture(VulkanImage texture) {
-        boundTextures[2] = texture;
+        if (boundTextures[2] != texture) {
+            boundTextures[2] = texture;
+            ++bindVersion;
+        }
     }
 
     public static void setOverlayTexture(VulkanImage texture) {
-        boundTextures[1] = texture;
+        if (boundTextures[1] != texture) {
+            boundTextures[1] = texture;
+            ++bindVersion;
+        }
     }
 
     public static void setActiveTexture(int activeTexture) {

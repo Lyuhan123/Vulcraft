@@ -53,6 +53,7 @@ public class DrawUtil {
         renderer.uploadAndBindUBOs(blitPipeline);
 
         VkCommandBuffer commandBuffer = Renderer.getCommandBuffer();
+        renderer.flushPipelineBind();
         VK11.vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
         VRenderSystem.enableCull();

@@ -5,7 +5,10 @@ layout(location = 1) in vec2 UV0;
 layout(location = 2) in ivec2 UV2;
 layout(location = 3) in vec4 Color;
 
-layout(binding = 0) uniform UniformBufferObject {
+// The per-draw matrix lives in a push constant, not a UBO: it changes on
+// every draw (chunk sections are drawn chunk-local), and push constants need
+// no descriptor set, no UBO slice and no vkCmdBindDescriptorSets to publish.
+layout(push_constant) uniform PushConstants {
     mat4 MVP;
 };
 

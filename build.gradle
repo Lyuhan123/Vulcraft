@@ -61,9 +61,27 @@ unimined.minecraft {
         runs.all {
             systemProperty("crl.dev.mixin", "${mod_id}.mixin.json")
             args += ['--username', minecraft_username]
+            // Window-size probe: -Pvulkanmod.benchSize=WxH forwards --width/--height to
+            // Minecraft so gpuPass can be measured at two resolutions. That is the only
+            // clean way to tell whether the GPU time is fill/overdraw bound (scales with
+            // pixels) or vertex/draw bound (roughly flat) - which decides the next lever.
+            // A -P property is used instead of System.getenv, because the daemon is
+            // long-lived and cannot be trusted to see a one-off shell export.
+            if (project.hasProperty('vulkanmod.benchSize')) {
+                def m = (project.property('vulkanmod.benchSize').toString() =~ /^(\d+)x(\d+)$/)
+                if (m.matches()) {
+                    args += ['--width', m.group(1), '--height', m.group(2)]
+                }
+            }
             def extraArgs = extra_jvm_args
             if (extraArgs != null && !extraArgs.trim().isEmpty()) {
-                jvmArgs += extraArgs.split { "\\s+" }.toList()
+                // split(String) - NOT split { closure }. The closure overload is
+                // Groovy's element-wise split, which for a String iterates its
+                // CHARACTERS, so the JVM was handed a list of single chars and died
+                // with ClassNotFoundException: [-XX:..., -XX:...]. This property had
+                // therefore never actually worked; it is what blocked the pass-11
+                // PrintInlining diagnostic.
+                jvmArgs += extraArgs.split("\\s+").toList()
             }
             if (enable_foundation_debug.toBoolean()) {
                 systemProperty("foundation.dump", "true")
@@ -71,6 +89,74 @@ unimined.minecraft {
             }
             if (is_coremod.toBoolean()) {
                 systemProperty("fml.coreMods.load", coremod_plugin_class_name)
+            }
+
+            // -Pvulkanmod.env=NAME=VALUE,NAME=VALUE
+            //
+            // The list below is read with System.getenv() *in the Gradle daemon*,
+            // and the daemon is long-lived: whether it sees a variable the calling
+            // shell exported for one run depends on whether Gradle happened to
+            // restart it. That is not a theory - pass 18 lost a correctness gate to
+            // it. `VULKANMOD_ENTPASS2_VERIFY=1 bash tools/run_once.sh ...` produced a
+            // run with the verify mode OFF, and the only evidence was a counter that
+            // read 902 instead of 1784. A silently wrong configuration is exactly
+            // what this block was added to prevent, and reading the list from the
+            // daemon's environment does not prevent it.
+            //
+            // So flags may also be named on the command line, where no daemon state
+            // is involved. The harnesses pass every VAR=VAL argument this way.
+            if (project.hasProperty('vulkanmod.env')) {
+                project.property('vulkanmod.env').toString().split(',').each { kv ->
+                    def eq = kv.indexOf('=')
+                    if (eq > 0) {
+                        environment(kv.substring(0, eq), kv.substring(eq + 1))
+                    }
+                }
+            }
+
+            // The benchmark/debug switches in VulkanMod are read with
+            // System.getenv(). The Gradle daemon is long-lived, so a forked run
+            // is not guaranteed to inherit the environment of whichever shell
+            // started the build - which would silently turn an A/B into two runs
+            // of the same configuration. Forward them explicitly.
+            ['MIP', 'ALPHADILATE', 'DLMERGE', 'PREPASS', 'DRAWTIMING', 'PROFILE_DUMP',
+             'AUTOJOIN', 'AUTOQUIT', 'BENCH_SECONDS', 'SHOT', 'SHOT_TAG',
+             'FRESH_WORLD', 'APPLYREUSE', 'REUSEALL',
+             'FREEZE', 'PIPESTATE', 'PIPESTATE_VERIFY', 'MEMOAB', 'AB',
+             'PROFILE_WARMUP', 'VF_FAST', 'VF_VERIFY', 'FORCE_DIRTY',
+             'VF_MEMO', 'VF_MEMO_VERIFY', 'BFS_FAST', 'BFS_VERIFY',
+             'BFS_FRUSTUM', 'BFS_FRUSTUM_VERIFY', 'BFS_BODY',
+             'BFS_MASK', 'BFS_MASK_VERIFY', 'BFS_T2', 'BFS_T2_VERIFY', 'ENT_ITER_TIME',
+             'BFS_ROW', 'BFS_ROW_VERIFY', 'BFS_PHASE',
+             'ENTPASS1', 'ENTPASS1_VERIFY',
+             'ENTPASS2', 'ENTPASS2_VERIFY',
+             'ENTIDX', 'ENTIDX_VERIFY',
+             // FLTMASK / FLTMASK_VERIFY were removed here in pass 23, restored in
+             // pass 24 to re-stage the record, and removed again when pass 24 closed
+             // it: the record is count-neutral and the loop it fed is already at its
+             // floor, so there is nothing left to arm. See FrameProfiler.FLMASK.
+             'TILEIDX', 'TILEIDX_VERIFY',
+             'BENCH_POS', 'BENCH_YAW', 'BENCH_PITCH', 'BENCH_CHEST', 'NOCULL', 'DEPTHBIAS',
+             'NOMIP', 'EARLYCUTOUT', 'THIRDPERSON', 'NOENTDRAW', 'DLPULL', 'XFPROBE',
+             'SKIPLAYER'].each { name ->
+                def key = "VULKANMOD_${name}"
+                def value = System.getenv(key)
+                if (value != null) {
+                    environment(key, value)
+                }
+            }
+
+            // Vulkan validation is a -D switch, not an env var. When the Intel
+            // driver faults inside a Vulkan entry point the stack only names the
+            // driver, so the validation layer is the only way to get the invalid
+            // call named.
+            if (System.getenv('VULKANMOD_VALIDATION') != null) {
+                systemProperty("vulkanmod.validationLayers", "true")
+            }
+
+            // TEMPORARY: texture-slot probe - see TextureProbe.
+            if (System.getenv('VULKANMOD_TEXPROBE') != null) {
+                systemProperty("vulkanmod.texprobe", "true")
             }
             return
         }

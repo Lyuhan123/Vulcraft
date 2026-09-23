@@ -1,5 +1,6 @@
 package com.yuhan123.vulkanmod.vulkan.queue;
 
+import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import com.yuhan123.vulkanmod.vulkan.Synchronization;
 import com.yuhan123.vulkanmod.vulkan.Vulkan;
 import com.yuhan123.vulkanmod.vulkan.util.VUtil;
@@ -30,7 +31,9 @@ public class TransferQueue extends Queue {
             copyRegion.srcOffset(srcOffset);
             copyRegion.dstOffset(dstOffset);
 
+            long __c = FrameProfiler.start();
             vkCmdCopyBuffer(commandBuffer.getHandle(), srcBuffer, dstBuffer, copyRegion);
+            FrameProfiler.addCmd(FrameProfiler.CMD_COPY_BUFFER, __c);
 
             this.submitCommands(commandBuffer);
             Synchronization.INSTANCE.addCommandBuffer(commandBuffer);
@@ -49,7 +52,9 @@ public class TransferQueue extends Queue {
             copyRegion.srcOffset(srcOffset);
             copyRegion.dstOffset(dstOffset);
 
+            long __c = FrameProfiler.start();
             vkCmdCopyBuffer(commandBuffer.getHandle(), srcBuffer, dstBuffer, copyRegion);
+            FrameProfiler.addCmd(FrameProfiler.CMD_COPY_BUFFER, __c);
 
             this.submitCommands(commandBuffer);
             vkWaitForFences(DEVICE, commandBuffer.fence, true, VUtil.UINT64_MAX);
@@ -66,7 +71,9 @@ public class TransferQueue extends Queue {
             copyRegion.srcOffset(srcOffset);
             copyRegion.dstOffset(dstOffset);
 
+            long __c = FrameProfiler.start();
             vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, copyRegion);
+            FrameProfiler.addCmd(FrameProfiler.CMD_COPY_BUFFER, __c);
         }
     }
 

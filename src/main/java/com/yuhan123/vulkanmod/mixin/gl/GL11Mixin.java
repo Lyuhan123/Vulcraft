@@ -7,15 +7,19 @@ import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 
 import static org.lwjgl.opengl.GL11.GL_SCISSOR_TEST;
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL12;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.system.NativeType;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
+import org.spongepowered.asm.mixin.Unique;
 
 import org.jetbrains.annotations.Nullable;
 import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
+
+import com.yuhan123.vulkanmod.gl.VkGlFramebuffer;
 
 @Mixin(GL11.class)
 public class GL11Mixin {
@@ -326,6 +330,70 @@ public class GL11Mixin {
     @Overwrite(remap = false)
     public static void glBlendFunc(@NativeType("GLenum") int sfactor, @NativeType("GLenum") int dfactor) {
         // TODO
+    }
+
+    /**
+     * Reads the bound framebuffer back into CPU memory.
+     *
+     * Without this, Minecraft's screenshot (F2 / ScreenShotHelper) silently
+     * produced nothing, which made every rendering bug undiagnosable without
+     * asking someone to look at the screen.
+     *
+     * <p>{@link VkGlFramebuffer#readPixels} always hands back R,G,B,A bytes; the
+     * GL {@code format} argument is honoured afterwards by
+     * {@link #vulkanmod$applyReadPixelsFormat}, so a caller that asks for
+     * GL_BGRA (vanilla's ScreenShotHelper does) gets B,G,R,A as it expects
+     * instead of a red/blue-swapped image.
+     */
+    @Overwrite(remap = false)
+    public static void glReadPixels(@NativeType("GLint") int x, @NativeType("GLint") int y,
+                                    @NativeType("GLsizei") int width, @NativeType("GLsizei") int height,
+                                    @NativeType("GLenum") int format, @NativeType("GLenum") int type,
+                                    @NativeType("void *") ByteBuffer pixels) {
+        final int start = pixels.position();
+        VkGlFramebuffer.readPixels(x, y, width, height, pixels);
+        vulkanmod$applyReadPixelsFormat(pixels, start, pixels.position(), format);
+    }
+
+    @Overwrite(remap = false)
+    public static void glReadPixels(@NativeType("GLint") int x, @NativeType("GLint") int y,
+                                    @NativeType("GLsizei") int width, @NativeType("GLsizei") int height,
+                                    @NativeType("GLenum") int format, @NativeType("GLenum") int type,
+                                    @NativeType("void *") IntBuffer pixels) {
+        ByteBuffer bytes = MemoryUtil.memByteBuffer(pixels);
+        final int start = bytes.position();
+        VkGlFramebuffer.readPixels(x, y, width, height, bytes);
+        vulkanmod$applyReadPixelsFormat(bytes, start, bytes.position(), format);
+    }
+
+    /**
+     * Converts the R,G,B,A bytes {@code readPixels} produced into the component
+     * order GL's {@code format} argument asked for.
+     *
+     * <p>Vanilla's screenshot path (ScreenShotHelper) requests
+     * {@code GL_BGRA} + {@code GL_UNSIGNED_INT_8_8_8_8_REV}. On a little-endian
+     * host that means the byte stream has to be B,G,R,A so the int the caller
+     * assembles comes out as {@code 0xAARRGGBB}, which is exactly what
+     * {@code BufferedImage.setRGB} wants. Ignoring the request left the bytes
+     * R,G,B,A, so the assembled int was {@code 0xAABBGGRR} - the red/blue
+     * inversion F2 was showing.
+     *
+     * <p>Only GL_BGRA is converted: it is the only order any caller in this
+     * codebase (or vanilla) asks for, and both the BGRA types
+     * (UNSIGNED_BYTE and UNSIGNED_INT_8_8_8_8_REV) describe the same byte
+     * order.
+     */
+    @Unique
+    private static void vulkanmod$applyReadPixelsFormat(ByteBuffer pixels, int start, int end, int format) {
+        if (format != GL12.GL_BGRA)
+            return;
+
+        // readPixels emits four bytes per pixel.
+        for (int p = start; p + 4 <= end; p += 4) {
+            final byte r = pixels.get(p);
+            pixels.put(p, pixels.get(p + 2));
+            pixels.put(p + 2, r);
+        }
     }
 
 

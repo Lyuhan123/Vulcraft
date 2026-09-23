@@ -110,6 +110,7 @@ public abstract class DeviceManager {
 
             // Get device properties
             deviceProperties = device.properties;
+            logPickedDevice(device);
 
             memoryProperties = VkPhysicalDeviceMemoryProperties.malloc();
             vkGetPhysicalDeviceMemoryProperties(physicalDevice, memoryProperties);
@@ -171,6 +172,10 @@ public abstract class DeviceManager {
             deviceVulkan11Features.sType$Default();
             deviceVulkan11Features.shaderDrawParameters(device.isDrawIndirectSupported());
 
+            VkPhysicalDeviceVulkan12Features deviceVulkan12Features = VkPhysicalDeviceVulkan12Features.calloc(stack);
+            deviceVulkan12Features.sType$Default();
+            deviceVulkan11Features.pNext(deviceVulkan12Features.address());
+
             VkPhysicalDeviceFeatures2 deviceFeatures = VkPhysicalDeviceFeatures2.calloc(stack);
             deviceFeatures.sType$Default();
             deviceFeatures.features().samplerAnisotropy(device.availableFeatures.features().samplerAnisotropy());
@@ -189,14 +194,14 @@ public abstract class DeviceManager {
             createInfo.sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
             createInfo.pQueueCreateInfos(queueCreateInfos);
             createInfo.pEnabledFeatures(deviceFeatures.features());
-            createInfo.pNext(deviceVulkan11Features);
+            createInfo.pNext(deviceVulkan11Features.address());
 
             if (Vulkan.DYNAMIC_RENDERING) {
                 VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamicRenderingFeaturesKHR = VkPhysicalDeviceDynamicRenderingFeaturesKHR.calloc(stack);
                 dynamicRenderingFeaturesKHR.sType$Default();
                 dynamicRenderingFeaturesKHR.dynamicRendering(true);
 
-                deviceVulkan11Features.pNext(dynamicRenderingFeaturesKHR.address());
+                deviceVulkan12Features.pNext(dynamicRenderingFeaturesKHR.address());
 
 //                //Vulkan 1.3 dynamic rendering
 //                VkPhysicalDeviceVulkan13Features deviceVulkan13Features = VkPhysicalDeviceVulkan13Features.calloc(stack);
@@ -272,6 +277,52 @@ public abstract class DeviceManager {
             availableExtensions.free();
 
             return indices.isSuitable() && extensionsSupported && swapChainAdequate;
+        }
+    }
+
+    /**
+     * Names the GPU actually in use, and whether {@code VK_EXT_multi_draw} is
+     * offered by it.
+     *
+     * <p>Which physical device Vulkan picked is invisible in every other log line,
+     * and every GPU-side number in the profile report is meaningless without it: a
+     * 5 ms main pass on a discrete GPU and on an integrated one call for opposite
+     * conclusions. The peer review of the indirect-batching design turns on
+     * multi-draw, so its presence or absence is recorded here too rather than
+     * inferred from the extension list at the point of use.
+     */
+    private static void logPickedDevice(Device device) {
+        // Enumerated vs suitable: the difference is the only thing that explains
+        // why this device and not another. autoPickDevice() prefers a discrete GPU,
+        // so a discrete GPU that is missing here either was never enumerated or
+        // failed isDeviceSuitable (required extensions / swapchain surface).
+        VulkanMod.LOGGER.info("[VKPROF] Vulkan devices visible:{}", getAvailableDevicesInfo());
+
+        final StringBuilder suitable = new StringBuilder(96);
+        for (Device d : suitableDevices) {
+            suitable.append("\n  ").append(d.deviceName)
+                    .append(" type=").append(d.properties.deviceType());
+        }
+        VulkanMod.LOGGER.info("[VKPROF] suitable devices:{}", suitable.length() == 0 ? " none" : suitable);
+
+        VkExtensionProperties.Buffer availableExtensions = getAvailableExtension(stackGet(), device.physicalDevice);
+
+        try {
+            final boolean multiDraw = availableExtensions.stream()
+                    .map(VkExtensionProperties::extensionNameString)
+                    .collect(toSet())
+                    .contains("VK_EXT_multi_draw");
+
+            VulkanMod.LOGGER.info("[VKPROF] GPU: '{}' type={} api={}.{}.{} driver=0x{} EXT_multi_draw={}",
+                    deviceProperties.deviceNameString(),
+                    deviceProperties.deviceType(),
+                    VK_VERSION_MAJOR(deviceProperties.apiVersion()),
+                    VK_VERSION_MINOR(deviceProperties.apiVersion()),
+                    VK_VERSION_PATCH(deviceProperties.apiVersion()),
+                    Integer.toHexString(deviceProperties.driverVersion()),
+                    multiDraw);
+        } finally {
+            availableExtensions.free();
         }
     }
 

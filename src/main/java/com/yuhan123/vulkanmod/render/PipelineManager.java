@@ -128,34 +128,76 @@ public abstract class PipelineManager {
         return supplier;
     }
 
+    /**
+     * Last format resolved, and its shader. The lookup runs once per draw call and
+     * a frame issues thousands of them, virtually all with the same format object
+     * (the terrain pointer state resolves to the shared
+     * DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL instance). A HashMap lookup
+     * there costs a VertexFormat.hashCode() - which walks two ArrayLists, because
+     * 1.12.2's VertexFormat does not cache its hash - plus the equality check on
+     * collision. A reference comparison short-circuits all of it.
+     *
+     * Only hits are memoised: a miss has to reach the map every time, otherwise a
+     * format looked up before its pipeline was registered would stay null.
+     */
+    private static VertexFormat lastChosenFormat;
+    private static ShaderInstance lastChosenShader;
+
     public static ShaderInstance chooseShader(VertexFormat vertexFormat) {
-        return shaderMap.get(vertexFormat);
+        if (vertexFormat == lastChosenFormat) {
+            return lastChosenShader;
+        }
+
+        ShaderInstance shader = shaderMap.get(vertexFormat);
+
+        if (shader != null) {
+            lastChosenFormat = vertexFormat;
+            lastChosenShader = shader;
+        }
+
+        return shader;
     }
 
+    /**
+     * Builds the shader for {@code configName} and returns the pipeline draws
+     * will actually use.
+     *
+     * <p>{@link ShaderInstance}'s constructor already reads the same JSON through
+     * the same {@link Pipeline.Builder} and assigns the result to its own
+     * {@code pipeline} field - which is the object every draw reaches via
+     * {@code ShaderInstance.bindPipeline() -> Renderer.bindGraphicsPipeline()}.
+     * Building a second {@code GraphicsPipeline} here used to be pure dead
+     * weight, and worse than dead: it was the object stored in the
+     * {@code blockPipeline} field, so anything that configured "the terrain
+     * pipeline" configured one that never recorded a single draw. That is
+     * exactly why the arena's per-instance matrix array
+     * ({@code Drawer.setCurrentFrame -> Pipeline.setStaticBuffer}) was written
+     * into a descriptor set nobody bound, while the drawn pipeline's
+     * {@code Matrices} binding stayed uninitialised.
+     */
     private static GraphicsPipeline createPipeline(String configName, VertexFormat vertexFormat) {
-        Pipeline.Builder pipelineBuilder = new Pipeline.Builder(vertexFormat, configName);
-
         try {
             ShaderInstance shader = new ShaderInstance(configName, vertexFormat);
             shaderMap.put(vertexFormat, shader);
 
-            pipelineBuilder.setUniformSupplierGetter(info -> getUniformSupplier(info.name, shader));//uniform load
+            GraphicsPipeline pipeline = shader.getPipeline();
+
+            if (pipeline == null)
+                throw new IllegalStateException("Shader '" + configName + "' produced no pipeline");
+
+            return pipeline;
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-
-
-
-        JsonObject config = ShaderLoadUtil.getJsonConfig("core", configName);
-        pipelineBuilder.parseBindings(config);
-
-        ShaderLoadUtil.loadShaders(pipelineBuilder, config, configName, "core");
-
-        return pipelineBuilder.createGraphicsPipeline();
     }
 
     public static GraphicsPipeline getTerrainShader(VertexFormat vertexFormat) {
         return shaderGetter.apply(vertexFormat);
+    }
+
+    /** The terrain (chunk) pipeline. */
+    public static GraphicsPipeline getBlockPipeline() {
+        return blockPipeline;
     }
 
     public static void setShaderGetter(Function<VertexFormat, GraphicsPipeline> consumer) {

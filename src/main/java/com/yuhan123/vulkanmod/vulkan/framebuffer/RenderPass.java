@@ -1,5 +1,6 @@
 package com.yuhan123.vulkanmod.vulkan.framebuffer;
 
+import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
 import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import com.yuhan123.vulkanmod.vulkan.Vulkan;
@@ -216,15 +217,28 @@ public class RenderPass {
             renderingInfo.pDepthAttachment(depthAttachment);
         }
 
+        long __c = FrameProfiler.start();
         KHRDynamicRendering.vkCmdBeginRenderingKHR(commandBuffer, renderingInfo);
+        FrameProfiler.addCmd(FrameProfiler.CMD_BEGIN_RENDERING, __c);
     }
 
     public void endDynamicRendering(VkCommandBuffer commandBuffer) {
+        long __c = FrameProfiler.start();
         KHRDynamicRendering.vkCmdEndRenderingKHR(commandBuffer);
+        FrameProfiler.addCmd(FrameProfiler.CMD_END_RENDERING, __c);
     }
 
     public Framebuffer getFramebuffer() {
         return framebuffer;
+    }
+
+    /** Depth load/store op of the bound pass - used by the VULKANMOD_DEPTHXRAY probe. */
+    public int getDepthLoadOp() {
+        return depthAttachmentInfo != null ? depthAttachmentInfo.loadOp : -1;
+    }
+
+    public int getDepthStoreOp() {
+        return depthAttachmentInfo != null ? depthAttachmentInfo.storeOp : -1;
     }
 
     public void cleanUp() {

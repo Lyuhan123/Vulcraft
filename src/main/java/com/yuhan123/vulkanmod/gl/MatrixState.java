@@ -1,5 +1,6 @@
 package com.yuhan123.vulkanmod.gl;
 
+import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
@@ -53,6 +54,8 @@ public class MatrixState {
         modelViewStack.push(new Matrix4f());
         projectionStack.push(new Matrix4f());
         textureStack.push(new Matrix4f());
+
+        VRenderSystem.setMatrixSource(MatrixState::applyCurrentMatrices);
     }
 
     public static void matrixMode(int m) {
@@ -63,15 +66,23 @@ public class MatrixState {
     }
 
     public static void loadIdentity() {
+        long __t = FrameProfiler.start();
         current().identity();
         apply();
+        FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_LOAD_IDENTITY);
     }
 
     public static void pushMatrix() {
-        stackOf(mode).push(obtainMatrix().set(current()));
+        long __t = FrameProfiler.start();
+
+        final Deque<Matrix4f> stack = stackOf(mode);
+        stack.push(obtainMatrix().set(current()));
+        FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_PUSH);
     }
 
     public static void popMatrix() {
+        long __t = FrameProfiler.start();
+
         Deque<Matrix4f> stack = stackOf(mode);
         if (stack.size() > 1) {
             recycleMatrix(stack.pop());
@@ -83,12 +94,15 @@ public class MatrixState {
             stack.peek().identity();
         }
         apply();
+        FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_POP);
     }
 
     public static void ortho(double left, double right, double bottom, double top, double zNear, double zFar) {
+        long __t = FrameProfiler.start();
         current().setOrtho((float) left, (float) right, (float) bottom, (float) top, (float) zNear, (float) zFar);
         remapZToVulkan();
         apply();
+        FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_NONE);
     }
 
     /**
@@ -112,6 +126,7 @@ public class MatrixState {
     }
 
     public static void perspective(float fovyDegrees, float aspect, float zNear, float zFar) {
+        long __t = FrameProfiler.start();
         // The Vulkan viewport is Y-inverted (y = height, height = -height), which maps
         // NDC y=+1 to the TOP of the window — the same convention as GL. The GL-style
         // Y-up perspective therefore renders the world upright as-is; no flip needed.
@@ -124,45 +139,56 @@ public class MatrixState {
         current().setPerspective((float) Math.toRadians(fovyDegrees), aspect, zNear, zFar);
         remapZToVulkan();
         apply();
+        FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_NONE);
     }
 
     public static void translate(float x, float y, float z) {
+        long __t = FrameProfiler.start();
+
         current().translate(x, y, z);
         apply();
+        FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_TRANSLATE);
     }
 
     public static void translate(double x, double y, double z) {
-        current().translate((float) x, (float) y, (float) z);
-        apply();
+        translate((float) x, (float) y, (float) z);
     }
 
     public static void rotate(float angleDegrees, float x, float y, float z) {
+        long __t = FrameProfiler.start();
         current().rotate((float) Math.toRadians(angleDegrees), x, y, z);
         apply();
+        FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_ROTATE);
     }
 
     public static void scale(float x, float y, float z) {
+        long __t = FrameProfiler.start();
         current().scale(x, y, z);
         apply();
+        FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_SCALE);
     }
 
     public static void scale(double x, double y, double z) {
-        current().scale((float) x, (float) y, (float) z);
-        apply();
+        scale((float) x, (float) y, (float) z);
     }
 
     public static void multMatrix(FloatBuffer matrix) {
+        long __t = FrameProfiler.start();
+
         // GL matrices are column-major; JOML's set(FloatBuffer) reads them directly
         Matrix4f m = obtainMatrix();
         m.set(matrix);
         current().mul(m);
         recycleMatrix(m);
         apply();
+        FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_MULT);
     }
 
     public static void rotateQuat(float x, float y, float z, float w) {
+        long __t = FrameProfiler.start();
         current().rotate(new Quaternionf(x, y, z, w));
         apply();
+        FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_ROTATE);
     }
 
     public static void getMatrix(int pname, FloatBuffer result) {
@@ -187,19 +213,26 @@ public class MatrixState {
     }
 
     /**
-     * Push the current matrices into VRenderSystem.
-     * <p>
-     * Both stacks are still copied out (32 float stores through cached,
-     * reusable FloatBuffer views - no allocation), but the MVP is merely marked
-     * dirty instead of being recomputed here. A single draw is preceded by
-     * several matrix operations, so deferring the multiply to flush time (once
-     * per draw, in ShaderInstance.apply) removes the vast majority of the work
-     * that used to run on every translate/rotate/scale: two Matrix4f, four
-     * FloatBuffer views and a full 4x4 multiply per call.
+     * Copies the current modelview and projection into VRenderSystem.
+     *
+     * Invoked from {@link VRenderSystem#calculateMVP()} - i.e. once per draw,
+     * when the MVP is actually needed - instead of from every matrix operation.
+     * A chunk section is drawn after pushMatrix + translate + multMatrix +
+     * popMatrix, so copying eagerly meant four full 4x4 copies per chunk where
+     * one suffices.
      */
-    private static void apply() {
+    private static void applyCurrentMatrices() {
         // The texture matrix (lightmap) is not consumed by the Vulkan shaders
         VRenderSystem.applyModelViewMatrix(modelViewStack.peek());
         VRenderSystem.applyProjectionMatrix(projectionStack.peek());
+    }
+
+    /**
+     * Marks the MVP stale. The matrices themselves are copied by
+     * {@link #applyCurrentMatrices()} at flush time, so a translate/rotate/scale
+     * only has to flag that a recompute is pending.
+     */
+    private static void apply() {
+        VRenderSystem.markMvpDirty();
     }
 }

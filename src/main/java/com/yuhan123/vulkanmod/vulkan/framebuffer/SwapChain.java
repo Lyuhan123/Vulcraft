@@ -36,6 +36,16 @@ public class SwapChain extends Framebuffer {
 
     private long swapChainId = VK_NULL_HANDLE;
     private List<VulkanImage> swapChainImages;
+    // One depth image per swapchain image. The renderer drives up to framesNum
+    // frames in flight on DIFFERENT swapchain images, but the per-image fence in
+    // imagesInFlight[] only serialises reuse of the *colour* image, not the depth
+    // buffer. A single shared depth image would let concurrent frames on image i
+    // and image j clobber each other's depth writes, which surfaces as
+    // entity/terrain interpenetration (the "depth needs fix" report) and, on
+    // faster GPUs, as flat grey ground patches bleeding through near terrain.
+    // Each framebuffer[i] therefore carries depthAttachments.get(i), and the
+    // accessors below return the one matching Renderer.getCurrentImage().
+    private List<VulkanImage> depthAttachments;
     private VkExtent2D extent2D;
     public boolean isBGRAformat;
     private boolean vsync = false;
@@ -51,9 +61,9 @@ public class SwapChain extends Framebuffer {
     }
 
     public void recreate() {
-        if (this.depthAttachment != null) {
-            this.depthAttachment.free();
-            this.depthAttachment = null;
+        if (this.depthAttachments != null) {
+            this.depthAttachments.forEach(VulkanImage::free);
+            this.depthAttachments = null;
         }
 
         if (!DYNAMIC_RENDERING) {
@@ -171,7 +181,7 @@ public class SwapChain extends Framebuffer {
             long[] framebuffers = new long[this.swapChainImages.size()];
 
             for (int i = 0; i < this.swapChainImages.size(); ++i) {
-                LongBuffer attachments = stack.longs(this.swapChainImages.get(i).getImageView(), this.depthAttachment.getImageView());
+                LongBuffer attachments = stack.longs(this.swapChainImages.get(i).getImageView(), this.depthAttachments.get(i).getImageView());
 
                 LongBuffer pFramebuffer = stack.mallocLong(1);
 
@@ -195,9 +205,12 @@ public class SwapChain extends Framebuffer {
     }
 
     private void createDepthResources() {
-        this.depthAttachment = VulkanImage.createDepthImage(depthFormat, this.width, this.height,
-                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                false, false);
+        this.depthAttachments = new ArrayList<>(this.swapChainImages.size());
+        for (int i = 0; i < this.swapChainImages.size(); ++i) {
+            this.depthAttachments.add(VulkanImage.createDepthImage(depthFormat, this.width, this.height,
+                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    false, false));
+        }
     }
 
     @Override
@@ -217,7 +230,8 @@ public class SwapChain extends Framebuffer {
         vkDestroySwapchainKHR(device, this.swapChainId, null);
         this.swapChainImages.forEach(image -> vkDestroyImageView(device, image.getImageView(), null));
 
-        this.depthAttachment.free();
+        if (this.depthAttachments != null)
+            this.depthAttachments.forEach(VulkanImage::free);
     }
 
     public long getId() {
@@ -242,6 +256,18 @@ public class SwapChain extends Framebuffer {
 
     public long getImageView(int i) {
         return this.swapChainImages.get(i).getImageView();
+    }
+
+    // Depth is per-swapchain-image (see depthAttachments); return the one that
+    // matches the frame currently being rendered.
+    @Override
+    public VulkanImage getDepthAttachment() {
+        return this.depthAttachments.get(Renderer.getCurrentImage());
+    }
+
+    @Override
+    public long getDepthImageView() {
+        return this.depthAttachments.get(Renderer.getCurrentImage()).getImageView();
     }
 
     private VkSurfaceFormatKHR getFormat(VkSurfaceFormatKHR.Buffer availableFormats) {

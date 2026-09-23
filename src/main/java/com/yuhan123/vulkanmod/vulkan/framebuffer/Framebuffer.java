@@ -58,9 +58,13 @@ public class Framebuffer {
 
     public void createImages() {
         if (this.hasColorAttachment) {
+            // TRANSFER_SRC so the framebuffer can be read back - glReadPixels
+            // (screenshots) copies the colour attachment out with
+            // vkCmdCopyImageToBuffer, which requires that usage bit.
             this.colorAttachment = VulkanImage.builder(this.width, this.height)
                     .setFormat(format)
-                    .setUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+                    .setUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                              | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
                     .setLinearFiltering(linearFiltering)
                     .setClamp(true)
                     .createVulkanImage();

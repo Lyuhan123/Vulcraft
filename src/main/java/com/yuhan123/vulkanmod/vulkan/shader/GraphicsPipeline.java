@@ -53,11 +53,18 @@ public class GraphicsPipeline extends Pipeline {
      */
     private long fragShaderModuleDepthOnly = 0;
 
+    /** TEMPORARY: winding experiment - VULKANMOD_NOCULL=1 disables back-face culling everywhere. */
+    private static final boolean NOCULL = System.getenv("VULKANMOD_NOCULL") != null;
+
+    /** TEMPORARY: A/B arm for the depth-bias fix - VULKANMOD_DEPTHBIAS=1 restores the old value. */
+    private static final boolean DEPTHBIAS = System.getenv("VULKANMOD_DEPTHBIAS") != null;
+
     GraphicsPipeline(Builder builder) {
         super(builder.shaderPath);
         this.buffers = builder.UBOs;
         this.manualUBO = builder.manualUBO;
         this.imageDescriptors = builder.imageDescriptors;
+        this.staticBuffers = builder.staticBuffers;
         this.pushConstants = builder.pushConstants;
         this.vertexFormat = builder.vertexFormat;
 
@@ -169,6 +176,14 @@ public class GraphicsPipeline extends Pipeline {
                 cullMode = VK_CULL_MODE_NONE;
             }
 
+            // TEMPORARY winding experiment: VULKANMOD_NOCULL=1 disables back-face
+            // culling for EVERY pipeline. If the foliage stipple and the shattered
+            // entities disappear, the defect is winding/culling; if they survive,
+            // it is not.
+            if (NOCULL) {
+                cullMode = VK_CULL_MODE_NONE;
+            }
+
             VkPipelineRasterizationStateCreateInfo rasterizer = VkPipelineRasterizationStateCreateInfo.calloc(stack);
             rasterizer.sType(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO);
             rasterizer.depthClampEnable(false);
@@ -177,7 +192,12 @@ public class GraphicsPipeline extends Pipeline {
             rasterizer.lineWidth(1.0f);
             rasterizer.cullMode(cullMode);
             // The viewport is Y-inverted (negative height), which reverses triangle
-            // winding in framebuffer space, so front faces are CW here.
+            // winding in framebuffer space. Measured: with CLOCKWISE here the TERRAIN
+            // itself loses its front faces (every grass surface disappears and only
+            // the back faces remain), so COUNTER_CLOCKWISE is the value that matches
+            // the winding the chunk geometry actually carries. Do NOT "fix" this
+            // again from the flip arithmetic alone - the arithmetic is off by the
+            // projection's own z/y remap; only an A/B screenshot settles it.
             rasterizer.frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE);
             boolean depthTestEnable = PipelineState.DepthState.depthTest(state.depthState_i);
             boolean depthWriteEnable = PipelineState.DepthState.depthMask(state.depthState_i);
@@ -185,7 +205,25 @@ public class GraphicsPipeline extends Pipeline {
                 depthTestEnable = true;
                 depthWriteEnable = true;
             }
-            rasterizer.depthBiasEnable(true);
+            // Depth bias was enabled here with NO factors ever set, which leaves
+            // depthBiasConstantFactor / depthBiasSlopeFactor at whatever the
+            // allocator handed back. With bias active, every fragment's depth is
+            // shifted, and the error is proportional to nothing useful: thick
+            // geometry hides it, but thin near-edge-on geometry (grass blades,
+            // leaf quads, water edges, entity part seams) crosses its neighbour's
+            // depth and shows up as black hair-line cracks with the water plane
+            // poking through the grass.
+            //
+            // GL's polygon offset is the feature this was standing in for, and
+            // 1.12.2 only enables it for a few cases (glPolygonOffset for
+            // overlays/shadowing). Nothing in the port maps GL polygon offset
+            // into this struct, so the correct value is simply bias OFF.
+            // VULKANMOD_DEPTHBIAS=1 restores the old unconditional enable for
+            // back-to-back A/B.
+            rasterizer.depthBiasEnable(DEPTHBIAS);
+            rasterizer.depthBiasConstantFactor(0.0f);
+            rasterizer.depthBiasSlopeFactor(0.0f);
+            rasterizer.depthBiasClamp(0.0f);
 
             // ===> MULTISAMPLING <===
 
@@ -319,10 +357,15 @@ public class GraphicsPipeline extends Pipeline {
      *    the early_fragment_tests variant; overdrawn fragments are rejected by
      *    the early LEQUAL test against the prepass depth before shading, and
      *    discard afterwards cannot corrupt depth because writing is disabled.
-     * 3. alpha test off (vanilla disables it for the SOLID layer) -> the
+     * 3. alpha test on + depthMask ON (single-pass cutout) -> the PLAIN module,
+     *    deliberately. early_fragment_tests would write depth for fragments the
+     *    shader goes on to discard, punching the cutout mask into a per-texel
+     *    stipple with sky bleeding through. See the note in the body; this was
+     *    measured at 61% of the leaf-canopy defect.
+     * 4. alpha test off (vanilla disables it for the SOLID layer) -> the
      *    discard-free variant restores early-Z; the discard statement would
      *    otherwise be dead code that still forces late fragment tests.
-     * 4. anything else -> the full original shader.
+     * 5. anything else -> the full original shader.
      */
     private long pickFragModule(PipelineState state) {
         if (this.fragShaderModuleDepthOnly != 0
@@ -332,6 +375,33 @@ public class GraphicsPipeline extends Pipeline {
 
         if (this.fragShaderModuleEarlyTest != 0
                 && state.alphaTest() && !state.depthMask()) {
+            return this.fragShaderModuleEarlyTest;
+        }
+
+        // NOTE: alpha test on + depthMask ON (the default single-pass cutout draw)
+        // deliberately does NOT take the early_fragment_tests variant.
+        //
+        // It used to, on the theory that "early-Z with depth writes enabled gets
+        // the prepass benefit for free in one draw". That is wrong, because
+        // early_fragment_tests moves the depth test - and with it the depth WRITE
+        // - ahead of the fragment shader. A leaf or grass texel that the shader
+        // then discards has already written depth, so the pixel is occluded while
+        // never being painted: the cutout alpha mask gets punched out into a
+        // per-texel stipple with sky showing through. The alpha-test semantic GL
+        // implements is the opposite - a discarded fragment must not write depth.
+        //
+        // Measured on the leaf canopy (854x480 bench, fixed camera, 12600-pixel
+        // box): 28.7% sky punch-through with the variant, 11.3% without - the
+        // variant accounted for 61% of the defect. The variant is only safe in
+        // the state its own field comment describes (depth writes off), which is
+        // the branch above.
+        //
+        // Cost of opting out: nil. The bench measured 220-265 fps either way,
+        // because discard already forces late fragment tests - which is precisely
+        // why attaching early_fragment_tests was not buying anything.
+        if (this.fragShaderModuleEarlyTest != 0
+                && state.alphaTest() && state.depthMask()
+                && System.getenv("VULKANMOD_EARLYCUTOUT") != null) {
             return this.fragShaderModuleEarlyTest;
         }
 

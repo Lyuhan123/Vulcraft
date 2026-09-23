@@ -1,7 +1,6 @@
 package com.yuhan123.vulkanmod.vulkan;
 
 import net.minecraft.client.renderer.vertex.VertexFormat;
-import com.yuhan123.vulkanmod.vulkan.shader.Pipeline;
 import com.yuhan123.vulkanmod.vulkan.memory.*;
 import com.yuhan123.vulkanmod.vulkan.memory.buffer.Buffer;
 import com.yuhan123.vulkanmod.vulkan.memory.buffer.IndexBuffer;
@@ -9,6 +8,7 @@ import com.yuhan123.vulkanmod.vulkan.memory.buffer.UniformBuffer;
 import com.yuhan123.vulkanmod.vulkan.memory.buffer.VertexBuffer;
 import com.yuhan123.vulkanmod.vulkan.memory.buffer.index.AutoIndexBuffer;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
+import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import com.yuhan123.vulkanmod.vulkan.util.VUtil;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.system.MemoryUtil;
@@ -46,6 +46,18 @@ public class Drawer {
     private UniformBuffer[] uniformBuffers;
 
     private int currentFrame;
+
+    // Last vertex/index buffer binding actually issued, with the binding epoch it
+    // was issued in. Buffer bindings are command-buffer state, so an entry is
+    // only trusted while the epoch still matches (see Renderer.getBindingEpoch).
+    private int boundVertexEpoch = -1;
+    private long boundVertexBufferId = 0;
+    private long boundVertexBufferOffset = -1;
+
+    private int boundIndexEpoch = -1;
+    private long boundIndexBufferId = 0;
+    private long boundIndexBufferOffset = -1;
+    private int boundIndexBufferType = -1;
 
     public Drawer() {
         // Index buffers
@@ -106,6 +118,7 @@ public class Drawer {
      * frame, which was the main CPU bottleneck.
      */
     public void draw(ByteBuffer vertexData, ByteBuffer indexData, int mode, VertexFormat vertexFormat, int vertexCount) {
+        FrameProfiler.onCopiedDraw();
         VertexBuffer vertexBuffer = this.vertexBuffers[this.currentFrame];
         int size = vertexFormat.getSize() * vertexCount;
         vertexBuffer.copyBuffer(vertexData, size);
@@ -146,12 +159,17 @@ public class Drawer {
         long __t = FrameProfiler.start();
         VkCommandBuffer commandBuffer = Renderer.getCommandBuffer();
 
-        VUtil.UNSAFE.putLong(pBuffers, vertexBuffer.getId());
-        VUtil.UNSAFE.putLong(pOffsets, vertexOffset);
-        nvkCmdBindVertexBuffers(commandBuffer, 0, 1, pBuffers, pOffsets);
+        // A vkCmdBindPipeline requested by apply()/bindPipeline() is issued here,
+        // not at request time, so a state change between the request and this draw
+        // coalesces into one bind instead of two (see Renderer.bindGraphicsPipeline).
+        Renderer.getInstance().flushPipelineBind();
 
+        bindVertexBuffer(commandBuffer, vertexBuffer, vertexOffset);
         bindIndexBuffer(commandBuffer, indexBuffer, indexType);
+
+        long __c = FrameProfiler.start();
         vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, 0, 0);
+        FrameProfiler.addCmd(FrameProfiler.CMD_DRAW_INDEXED, __c);
         FrameProfiler.onDraw();
         FrameProfiler.addDrawRecord(__t);
     }
@@ -164,13 +182,43 @@ public class Drawer {
         long __t = FrameProfiler.start();
         VkCommandBuffer commandBuffer = Renderer.getCommandBuffer();
 
-        VUtil.UNSAFE.putLong(pBuffers, vertexBuffer.getId());
-        VUtil.UNSAFE.putLong(pOffsets, vertexOffset);
-        nvkCmdBindVertexBuffers(commandBuffer, 0, 1, pBuffers, pOffsets);
+        Renderer.getInstance().flushPipelineBind();
 
+        bindVertexBuffer(commandBuffer, vertexBuffer, vertexOffset);
+
+        long __c = FrameProfiler.start();
         vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
+        FrameProfiler.addCmd(FrameProfiler.CMD_DRAW, __c);
         FrameProfiler.onDraw();
         FrameProfiler.addDrawRecord(__t);
+    }
+
+    /**
+     * Binds a vertex buffer unless the same buffer at the same offset is already
+     * bound in the current command buffer. The depth-prepass flow draws each
+     * cutout chunk section twice from the same buffer, so this removes one bind
+     * per chunk there.
+     */
+    private void bindVertexBuffer(VkCommandBuffer commandBuffer, Buffer vertexBuffer, long vertexOffset) {
+        final long id = vertexBuffer.getId();
+
+        if (boundVertexEpoch == Renderer.getBindingEpoch()
+                && boundVertexBufferId == id && boundVertexBufferOffset == vertexOffset) {
+            FrameProfiler.onVertexBindSkipped();
+            return;
+        }
+
+        final long __vb = System.nanoTime();
+        VUtil.UNSAFE.putLong(pBuffers, id);
+        VUtil.UNSAFE.putLong(pOffsets, vertexOffset);
+        long __c = FrameProfiler.start();
+        nvkCmdBindVertexBuffers(commandBuffer, 0, 1, pBuffers, pOffsets);
+        FrameProfiler.addCmd(FrameProfiler.CMD_BIND_VERTEX, __c);
+        FrameProfiler.addVertexBind(__vb);
+
+        boundVertexEpoch = Renderer.getBindingEpoch();
+        boundVertexBufferId = id;
+        boundVertexBufferOffset = vertexOffset;
     }
 
     /**
@@ -178,6 +226,8 @@ public class Drawer {
      * once) at the given byte offset. No vertex data is copied this frame.
      */
     public void drawPersistent(VertexBuffer vertexBuffer, int byteOffset, int mode, VertexFormat vertexFormat, int vertexCount) {
+        FrameProfiler.onPersistentDraw();
+        FrameProfiler.logDrawState("block");
         AutoIndexBuffer autoIndexBuffer = getAutoIndexBuffer(mode, vertexCount);
 
         if (autoIndexBuffer != null) {
@@ -185,16 +235,81 @@ public class Drawer {
             // checkCapacity works in VERTEX counts, not index counts.
             autoIndexBuffer.checkCapacity(vertexCount);
 
-            drawIndexed(vertexBuffer, byteOffset, autoIndexBuffer.getIndexBuffer(), indexCount,
-                        autoIndexBuffer.getIndexBuffer().indexType.value);
+            final int stride = vertexFormat.getSize();
+            // The offset has to be a whole number of vertices or it cannot be
+            // expressed as firstVertex; display-list captures and chunk VBOs are
+            // always stride-aligned, so this only guards a mis-fetch.
+            if (byteOffset % stride == 0) {
+                // Bind the whole buffer at 0 and carry the offset in the draw's
+                // vertexOffset. Previously every replayed draw bound the buffer
+                // at its own byte offset, so the vertex-bind dedup below could
+                // never hit and each of the ~3000 display-list draws a frame
+                // issued its own vkCmdBindVertexBuffers. Binding at 0 turns
+                // every draw after the first of a list into a dedup hit.
+                drawIndexedAt(vertexBuffer, byteOffset, stride,
+                              autoIndexBuffer.getIndexBuffer(), indexCount,
+                              autoIndexBuffer.getIndexBuffer().indexType.value, 0);
+            }
+            else {
+                drawIndexed(vertexBuffer, byteOffset, autoIndexBuffer.getIndexBuffer(), indexCount,
+                            autoIndexBuffer.getIndexBuffer().indexType.value);
+            }
         }
         else {
             draw(vertexBuffer, byteOffset, vertexCount);
         }
     }
 
+    /**
+     * Indexed draw with the buffer bound at offset 0 and the section's own
+     * byte position carried as the draw command's {@code vertexOffset}, so
+     * consecutive draws out of the same buffer turn into vertex-bind dedup
+     * hits. {@code firstInstance} is always 0 on this path: the shader takes
+     * the MVP as a push constant and never reads {@code gl_InstanceIndex}.
+     */
+    private void drawIndexedAt(VertexBuffer vertexBuffer, long byteOffset, int vertexStride,
+                               Buffer indexBuffer, int indexCount, int indexType, int firstInstance) {
+        long __t = FrameProfiler.start();
+        VkCommandBuffer commandBuffer = Renderer.getCommandBuffer();
+
+        Renderer.getInstance().flushPipelineBind();
+        bindVertexBuffer(commandBuffer, vertexBuffer, 0L);
+        bindIndexBuffer(commandBuffer, indexBuffer, indexType);
+
+        long __c = FrameProfiler.start();
+        vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, (int) (byteOffset / vertexStride), firstInstance);
+        FrameProfiler.addCmd(FrameProfiler.CMD_DRAW_INDEXED, __c);
+        FrameProfiler.onDraw();
+        FrameProfiler.addDrawRecord(__t);
+    }
+
+    /**
+     * Binds an index buffer unless the identical binding is already in effect.
+     *
+     * Every chunk section of a layer draws quads, and quads are expanded through
+     * one shared generated index buffer, so without this check each chunk issued
+     * a vkCmdBindIndexBuffer that bound the exact same buffer, offset and type as
+     * the previous draw.
+     */
     public void bindIndexBuffer(VkCommandBuffer commandBuffer, Buffer indexBuffer, int indexType) {
-        vkCmdBindIndexBuffer(commandBuffer, indexBuffer.getId(), indexBuffer.getOffset(), indexType);
+        final long id = indexBuffer.getId();
+        final long offset = indexBuffer.getOffset();
+
+        if (boundIndexEpoch == Renderer.getBindingEpoch()
+                && boundIndexBufferId == id && boundIndexBufferOffset == offset
+                && boundIndexBufferType == indexType) {
+            FrameProfiler.onIndexBindSkipped();
+            return;
+        }
+
+        long __c = FrameProfiler.start();
+        vkCmdBindIndexBuffer(commandBuffer, id, offset, indexType);
+        FrameProfiler.addCmd(FrameProfiler.CMD_BIND_INDEX, __c);
+
+        boundIndexEpoch = Renderer.getBindingEpoch();
+        boundIndexBufferId = id;
+        boundIndexBufferOffset = offset;
+        boundIndexBufferType = indexType;
     }
 
     public void cleanUpResources() {

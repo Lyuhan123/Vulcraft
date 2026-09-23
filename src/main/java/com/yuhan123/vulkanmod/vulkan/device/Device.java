@@ -124,7 +124,7 @@ public class Device {
 
             vkEnumerateDeviceExtensionProperties(physicalDevice, (String) null, extensionCount, null);
 
-            VkExtensionProperties.Buffer availableExtensions = VkExtensionProperties.malloc(extensionCount.get(0), stack);
+            VkExtensionProperties.Buffer availableExtensions = VkExtensionProperties.malloc(extensionCount.get(0));
 
             vkEnumerateDeviceExtensionProperties(physicalDevice, (String) null, extensionCount, availableExtensions);
 

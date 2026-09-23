@@ -34,17 +34,54 @@ import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.util.vector.Quaternion;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 
 @Mixin(GlStateManager.class)
 public class GlStateManagerMixin {
    /**
-    * Depth-prepass flow for cutout terrain. On by default; set
-    * VULKANMOD_PREPASS=0 to disable for A/B benchmarking.
+    * Cutout terrain draw mode.
+    *
+    * Default (single pass): one draw per chunk section, using the
+    * early_fragment_tests fragment variant with depth writes ON. The early depth
+    * test rejects overdrawn cutout fragments before the shader runs, which is
+    * the same early-Z benefit the two-pass flow buys - at half the draws, half
+    * the pipeline binds, half the push constants and half the vertex binds.
+    *
+    * The two-pass prepass is interleaved per chunk section (depth-only pass for
+    * chunk N, then the colour pass for chunk N), so it never writes more than one
+    * chunk's depth before that chunk's colour pass. Its entire benefit is
+    * therefore within-draw overdraw rejection, which an early_fragment_tests
+    * shader with depth writes enabled gets for free in a single draw.
+    *
+    * VULKANMOD_PREPASS=two (or =1) restores the original two-pass depth prepass;
+    * VULKANMOD_PREPASS=single (or =0, or unset) selects the single-pass mode.
     */
-   private static final boolean PREPASS_ENABLED = !"0".equals(System.getenv("VULKANMOD_PREPASS"));
+   private static final boolean PREPASS_TWO_PASS = "two".equals(System.getenv("VULKANMOD_PREPASS"))
+         || "1".equals(System.getenv("VULKANMOD_PREPASS"));
    private static boolean PREPASS_LOGGED = false;
+
+   // TEMPORARY (d15): draw-time depth-state probe for the "see through blocks"
+   // report. Reads the layer published by RenderGlobalMixin and logs the actual
+   // GL depth configuration in effect at the first chunk draw of each layer -
+   // the ground truth the HEAD probe can miss if Minecraft sets the layer's depth
+   // state after the HEAD hooks fire.
+   private static final boolean VULKANMOD_DEPTHXRAY_DRAW = System.getenv("VULKANMOD_DEPTHXRAY") != null;
+   private static final java.util.Set<String> VULKANMOD_XRAY_DRAW_LAYERS = new java.util.HashSet<>();
+   private static void vulkanmod$xrayDrawDepth() {
+      String layer = com.yuhan123.vulkanmod.render.util.XrayState.currentLayer;
+      if (layer == null || !VULKANMOD_XRAY_DRAW_LAYERS.add(layer)) return;
+      int dl = -1, ds = -1;
+      try {
+         com.yuhan123.vulkanmod.vulkan.Renderer r = com.yuhan123.vulkanmod.vulkan.Renderer.getInstance();
+         com.yuhan123.vulkanmod.vulkan.framebuffer.RenderPass rp = r.getBoundRenderPass();
+         if (rp != null) { dl = rp.getDepthLoadOp(); ds = rp.getDepthStoreOp(); }
+      } catch (Throwable ignored) {}
+      VulkanMod.LOGGER.info("[VKXRAY-DRAW] layer={} depthTest={} depthMask={} alphaTest={} depthFunc=0x{} colorMask=0x{} boundDepthLoad={} boundDepthStore={}",
+            layer, VRenderSystem.depthTest, VRenderSystem.depthMask, VRenderSystem.alphaTest,
+            Integer.toHexString(VRenderSystem.depthFun), Integer.toHexString(VRenderSystem.colorMask), dl, ds);
+   }
 
    private static int ptrStride = 0;
    private static int ptrPosOffset = -1;
@@ -528,7 +565,15 @@ public class GlStateManagerMixin {
       clientUv0Buffer = null;
       clientUv1Buffer = null;
       clientArrays = false;
-      cachedPointerFormatValid = false;
+      // Deliberately does NOT invalidate the format memo below. The memo is
+      // validated by comparing all six pointer fields, which are exactly the
+      // inputs computeFormatFromPointers() reads, so it cannot go stale: the
+      // -1 values written here simply fail the comparison and force a rebuild.
+      // Invalidating it here used to defeat the memo on every chunk section -
+      // 1.12.2 re-issues glVertexPointer/glColorPointer/glTexCoordPointer/
+      // glNormalPointer before each one, so the format was rebuilt (two
+      // ArrayLists, up to five VertexFormatElements, an O(n^2) sort and a
+      // VertexFormat) thousands of times per frame only to be thrown away.
    }
 
    private static VertexFormat buildFormatFromPointers() {
@@ -556,79 +601,83 @@ public class GlStateManagerMixin {
    }
 
    private static VertexFormat computeFormatFromPointers() {
-      if (ptrPosOffset >= 0 && ptrStride > 0) {
-         List<VertexFormatElement> elements = new ArrayList<>();
-         List<Integer> offsets = new ArrayList<>();
-
-         elements.add(new VertexFormatElement(0, EnumType.FLOAT, EnumUsage.POSITION, 3));
-         offsets.add(ptrPosOffset);
-
-         if (ptrUv0Offset >= 0) {
-            elements.add(new VertexFormatElement(0, EnumType.FLOAT, EnumUsage.UV, 2));
-            offsets.add(ptrUv0Offset);
-         }
-
-         if (ptrColorOffset >= 0) {
-            elements.add(new VertexFormatElement(0, EnumType.UBYTE, EnumUsage.COLOR, 4));
-            offsets.add(ptrColorOffset);
-         }
-
-         if (ptrNormalOffset >= 0) {
-            elements.add(new VertexFormatElement(0, EnumType.BYTE, EnumUsage.NORMAL, 3));
-            offsets.add(ptrNormalOffset);
-         }
-
-         if (ptrUv1Offset >= 0) {
-            elements.add(new VertexFormatElement(1, EnumType.SHORT, EnumUsage.UV, 2));
-            offsets.add(ptrUv1Offset);
-         }
-
-         // Sort elements by ascending byte offset so the reconstructed
-         // VertexFormat's auto-assigned offsets match the GL pointer offsets.
-         for (int i = 0; i < elements.size(); i++) {
-            for (int j = i + 1; j < elements.size(); j++) {
-               if (offsets.get(j) >= 0 && (offsets.get(i) < 0 || offsets.get(j) < offsets.get(i))) {
-                  VertexFormatElement tmp = elements.get(i);
-                  elements.set(i, elements.get(j));
-                  elements.set(j, tmp);
-                  int to = offsets.get(i);
-                  offsets.set(i, offsets.get(j));
-                  offsets.set(j, to);
-               }
-            }
-         }
-
-         // Sort by ascending byte offset so the auto-assigned offsets match the
-         // vanilla format offsets (Position@0, Color@12, UV0@16, UV1@24 for BLOCK).
-         VertexFormat format = new VertexFormat();
-
-         for (VertexFormatElement e : elements) {
-            format.addElement(e);
-         }
-
-         // POSITION_TEX_COLOR_NORMAL carries a 1-byte PADDING after NORMAL_3B that
-         // the GL pointer API cannot see; return the vanilla constant so the shader
-         // map key matches (12+8+4+4 = 28 vs the reconstructed 27).
-         if (ptrNormalOffset >= 0 && ptrUv0Offset >= 0 && ptrColorOffset >= 0) {
-            return DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL;
-         }
-
-         return format;
-      } else {
+      if (ptrPosOffset < 0 || ptrStride <= 0) {
          return null;
       }
+
+      // Fast path, checked before anything is allocated. This is the layout of
+      // every chunk-section draw (Position, Color, UV0, UV1, Normal) and it is
+      // the only case that matters for throughput. The vanilla constant is
+      // returned rather than a reconstructed format because
+      // POSITION_TEX_COLOR_NORMAL carries a 1-byte PADDING after NORMAL_3B that
+      // the GL pointer API cannot see (12+8+4+4 = 28 vs the reconstructed 27),
+      // and PipelineManager's shader map is keyed on the vanilla constant.
+      // Previously this check sat at the *end* of the method, so every chunk
+      // paid for two ArrayLists, up to five VertexFormatElements, an O(n^2)
+      // sort and a VertexFormat, then discarded all of it here.
+      if (ptrNormalOffset >= 0 && ptrUv0Offset >= 0 && ptrColorOffset >= 0) {
+         return DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL;
+      }
+
+      List<VertexFormatElement> elements = new ArrayList<>();
+      List<Integer> offsets = new ArrayList<>();
+
+      elements.add(new VertexFormatElement(0, EnumType.FLOAT, EnumUsage.POSITION, 3));
+      offsets.add(ptrPosOffset);
+
+      if (ptrUv0Offset >= 0) {
+         elements.add(new VertexFormatElement(0, EnumType.FLOAT, EnumUsage.UV, 2));
+         offsets.add(ptrUv0Offset);
+      }
+
+      if (ptrColorOffset >= 0) {
+         elements.add(new VertexFormatElement(0, EnumType.UBYTE, EnumUsage.COLOR, 4));
+         offsets.add(ptrColorOffset);
+      }
+
+      if (ptrNormalOffset >= 0) {
+         elements.add(new VertexFormatElement(0, EnumType.BYTE, EnumUsage.NORMAL, 3));
+         offsets.add(ptrNormalOffset);
+      }
+
+      if (ptrUv1Offset >= 0) {
+         elements.add(new VertexFormatElement(1, EnumType.SHORT, EnumUsage.UV, 2));
+         offsets.add(ptrUv1Offset);
+      }
+
+      // Sort elements by ascending byte offset so the reconstructed
+      // VertexFormat's auto-assigned offsets match the GL pointer offsets
+      // (Position@0, Color@12, UV0@16, UV1@24 for BLOCK).
+      for (int i = 0; i < elements.size(); i++) {
+         for (int j = i + 1; j < elements.size(); j++) {
+            if (offsets.get(j) >= 0 && (offsets.get(i) < 0 || offsets.get(j) < offsets.get(i))) {
+               VertexFormatElement tmp = elements.get(i);
+               elements.set(i, elements.get(j));
+               elements.set(j, tmp);
+               int to = offsets.get(i);
+               offsets.set(i, offsets.get(j));
+               offsets.set(j, to);
+            }
+         }
+      }
+
+      VertexFormat format = new VertexFormat();
+
+      for (VertexFormatElement e : elements) {
+         format.addElement(e);
+      }
+
+      return format;
    }
 
    @Overwrite
    public static void glNormalPointer(int p_187446_0_, int p_187446_1_, ByteBuffer p_187446_2_) {
       clientArrays = true;
-      cachedPointerFormatValid = false;
       ptrNormalOffset = p_187446_2_ != null ? p_187446_2_.position() : 0;
    }
 
    @Overwrite
    public static void glTexCoordPointer(int p_187405_0_, int p_187405_1_, int p_187405_2_, int p_187405_3_) {
-      cachedPointerFormatValid = false;
       if (ptrUv0Offset == -1) {
          ptrUv0Offset = p_187405_3_;
       } else {
@@ -639,7 +688,6 @@ public class GlStateManagerMixin {
    @Overwrite
    public static void glTexCoordPointer(int p_187404_0_, int p_187404_1_, int p_187404_2_, ByteBuffer p_187404_3_) {
       clientArrays = true;
-      cachedPointerFormatValid = false;
       if (ptrUv0Offset == -1) {
          ptrUv0Offset = p_187404_3_ != null ? p_187404_3_.position() : 0;
          clientUv0Buffer = p_187404_3_;
@@ -667,14 +715,12 @@ public class GlStateManagerMixin {
 
    @Overwrite
    public static void glColorPointer(int p_187406_0_, int p_187406_1_, int p_187406_2_, int p_187406_3_) {
-      cachedPointerFormatValid = false;
       ptrColorOffset = p_187406_3_;
    }
 
    @Overwrite
    public static void glColorPointer(int p_187400_0_, int p_187400_1_, int p_187400_2_, ByteBuffer p_187400_3_) {
       clientArrays = true;
-      cachedPointerFormatValid = false;
       ptrColorOffset = p_187400_3_ != null ? p_187400_3_.position() : 0;
       clientColorBuffer = p_187400_3_;
    }
@@ -761,13 +807,27 @@ public class GlStateManagerMixin {
       }
    }
 
+   /**
+    * Draws one chunk section from its dedicated persistent vertex buffer.
+    *
+    * (The former shared-slab arena path was removed; every section draws
+    * directly from its own buffer.)
+    */
+   @Unique
+   private static void drawChunk(VkGlBuffer glBuffer, VertexBuffer persistent, int byteOffset,
+                                 int mode, VertexFormat vertexFormat, int vertexCount) {
+      Renderer.getDrawer().drawPersistent(persistent, byteOffset, mode, vertexFormat, vertexCount);
+   }
+
    @Overwrite
    public static void glDrawArrays(int p_187439_0_, int p_187439_1_, int p_187439_2_) {
       if (Renderer.isRecording() && p_187439_2_ > 0) {
+         final long __pre = com.yuhan123.vulkanmod.render.util.FrameProfiler.start();
          VertexFormat vertexFormat = buildFormatFromPointers();
          if (vertexFormat != null) {
             ShaderInstance shader = PipelineManager.chooseShader(vertexFormat);
             if (shader != null) {
+               com.yuhan123.vulkanmod.render.util.FrameProfiler.addDrawPreamble(__pre);
                shader.apply();
                Renderer renderer = Renderer.getInstance();
                if (renderer.getBoundPipeline() != null) {
@@ -806,6 +866,11 @@ public class GlStateManagerMixin {
                   // with unchanged contents. Bind the persistent upload instead of
                   // copying the whole range into the per-frame vertex buffer.
                   VertexBuffer persistent = glBuffer.getPersistentVertexBuffer();
+
+                  // TEMPORARY: chunk-draw pipeline census - see TextureProbe.
+                  com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onChunkDraw(
+                        shader.getName(), vertexFormat.getSize(), vertexFormat.getElementCount(), p_187439_2_);
+
                   if (persistent != null && persistent.getBufferSize() >= bytesNeeded) {
                      if (com.yuhan123.vulkanmod.gl.DisplayListManager.isRecordingList()) {
                         data = glBuffer.getData();
@@ -814,30 +879,50 @@ public class GlStateManagerMixin {
                         return;
                      }
 
-                     // Depth-prepass flow for cutout terrain (alpha test on + BLOCK
-                     // format = the cutout chunk layers). Pass 1 writes depth only
-                     // (colorMask off); pass 2 re-draws with EQUAL compare and
+                     // Cutout terrain (alpha test on + BLOCK format) is drawn in
+                     // one of two ways.
+                     //
+                     // Default: a SINGLE draw. The fragment variant picked for
+                     // "alpha test on + depth writes on" is the
+                     // early_fragment_tests clone, so the depth test runs before
+                     // the shader and rejects overdrawn foliage fragments without
+                     // shading them - while still writing depth, so a surviving
+                     // fragment occludes the geometry drawn after it. Same
+                     // rendering as vanilla (one draw, alpha test, depth write),
+                     // with early-Z restored.
+                     //
+                     // VULKANMOD_PREPASS=two restores the original two-pass flow:
+                     // pass 1 writes depth only (colorMask off) with a cheap
+                     // depth-only shader; pass 2 re-draws with EQUAL compare and
                      // depthMask off, which routes the shader to the
                      // early_fragment_tests variant so overdrawn fragments are
-                     // rejected before the fragment shader runs. Without this,
-                     // the discard-based alpha test forces late tests and every
-                     // overlapping foliage fragment pays full shading.
-                     // VULKANMOD_PREPASS=0 disables it for A/B benchmarking.
-                     // depthMask must be ON: for the translucent layer it is
-                     // already off, so the prepass would be a pure no-op draw
-                     // (writes neither colour nor depth) -- skip it and let the
-                     // single draw use the early_fragment_tests variant against
-                     // the opaque depth. NOTE: buildFormatFromPointers()
-                     // constructs a fresh VertexFormat per pointer state, so
-                     // identity comparison against DefaultVertexFormats.BLOCK
-                     // never matches -- compare by layout fingerprint instead.
-                     if (PREPASS_ENABLED && VRenderSystem.alphaTest && VRenderSystem.depthMask
-                           && vertexFormat.getSize() == DefaultVertexFormats.BLOCK.getSize()
-                           && vertexFormat.getElementCount() == DefaultVertexFormats.BLOCK.getElementCount()) {
-                        if (!PREPASS_LOGGED) {
-                           PREPASS_LOGGED = true;
-                           VulkanMod.LOGGER.info("[VKPROF] prepass double-draw path active");
-                        }
+                     // rejected before the fragment shader runs. Without either
+                     // path the discard-based alpha test forces late tests and
+                     // every overlapping foliage fragment pays full shading.
+                     //
+                     // The depthMask check matters: for the translucent layer it
+                     // is already off, so a depth prepass would be a pure no-op
+                     // draw (writes neither colour nor depth) - fall through to the
+                     // single draw and let it use the early_fragment_tests variant
+                     // against the opaque depth.
+                     // NOTE: buildFormatFromPointers() constructs a fresh
+                     // VertexFormat per pointer state, so identity comparison
+                     // against DefaultVertexFormats.BLOCK never matches -- compare
+                     // by layout fingerprint instead.
+                     final boolean blockFormat = vertexFormat.getSize() == DefaultVertexFormats.BLOCK.getSize()
+                           && vertexFormat.getElementCount() == DefaultVertexFormats.BLOCK.getElementCount();
+
+                     // Logged unconditionally (not per branch) so a benchmark run can
+                     // confirm both the resolved mode and the raw env var value the
+                     // client process actually received.
+                     if (!PREPASS_LOGGED && blockFormat && VRenderSystem.alphaTest && VRenderSystem.depthMask) {
+                        PREPASS_LOGGED = true;
+                        VulkanMod.LOGGER.info("[VKPROF] cutout path: {} (VULKANMOD_PREPASS={})",
+                              PREPASS_TWO_PASS ? "two-pass depth prepass" : "single-pass early-Z",
+                              System.getenv("VULKANMOD_PREPASS"));
+                     }
+
+                     if (PREPASS_TWO_PASS && VRenderSystem.alphaTest && VRenderSystem.depthMask && blockFormat) {
 
                         int savedColorMask = VRenderSystem.colorMask;
                         boolean savedDepthMask = VRenderSystem.depthMask;
@@ -850,7 +935,7 @@ public class GlStateManagerMixin {
                         // pipeline layout is unchanged.
                         VRenderSystem.colorMask = 0;
                         shader.rebindPipelineOnly();
-                        Renderer.getDrawer().drawPersistent(persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
+                        drawChunk(glBuffer, persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
 
                         // Pass 2: colour. colorMask MUST be restored BEFORE this
                         // bind -- otherwise the colour pass binds the colorMask=0
@@ -861,13 +946,14 @@ public class GlStateManagerMixin {
                         VRenderSystem.colorMask = savedColorMask;
                         VRenderSystem.depthMask = false;
                         shader.rebindPipelineOnly();
-                        Renderer.getDrawer().drawPersistent(persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
+                        drawChunk(glBuffer, persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
 
                         VRenderSystem.depthMask = savedDepthMask;
                         return;
                      }
 
-                     Renderer.getDrawer().drawPersistent(persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
+                     if (VULKANMOD_DEPTHXRAY_DRAW) { vulkanmod$xrayDrawDepth(); }
+                     drawChunk(glBuffer, persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
                      return;
                   }
 

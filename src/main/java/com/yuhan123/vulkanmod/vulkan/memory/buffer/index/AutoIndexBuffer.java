@@ -185,6 +185,18 @@ public class AutoIndexBuffer {
         return buffer;
     }
 
+    /**
+     * Expands a {@code GL_TRIANGLE_STRIP} into an indexed triangle list.
+     *
+     * <p>A strip's triangles <b>alternate winding</b>: GL defines triangle
+     * {@code i} as vertices {@code (i, i+1, i+2)} but reverses the winding of
+     * every odd {@code i} so that a zigzag strip keeps a single facing. Emitting
+     * {@code (i, i+1, i+2)} for every {@code i} therefore reproduces the right
+     * area but gives every other triangle the opposite facing - and with
+     * back-face culling on, those triangles are discarded, which is what made a
+     * four-vertex strip draw as a single triangle (the "half quad" text defect).
+     * Odd triangles must be emitted in swapped order: {@code (i+1, i, i+2)}.
+     */
     public static ByteBuffer genTriangleStripIndices(int vertexCount) {
         int indexCount = (vertexCount - 2) * 3;
 
@@ -193,9 +205,15 @@ public class AutoIndexBuffer {
 
         int j = 0;
         for (int i = 0; i < vertexCount - 2; ++i) {
-            idxs.put(j + 0, (short) i);
-            idxs.put(j + 1, (short) (i + 1));
-            idxs.put(j + 2, (short) (i + 2));
+            if ((i & 1) == 0) {
+                idxs.put(j + 0, (short) i);
+                idxs.put(j + 1, (short) (i + 1));
+                idxs.put(j + 2, (short) (i + 2));
+            } else {
+                idxs.put(j + 0, (short) (i + 1));
+                idxs.put(j + 1, (short) i);
+                idxs.put(j + 2, (short) (i + 2));
+            }
 
             j += 3;
         }

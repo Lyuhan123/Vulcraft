@@ -17,7 +17,190 @@ public class PipelineState {
 
     public static PipelineState currentState = DEFAULT;
 
+    /**
+     * Every distinct state combination seen so far.
+     *
+     * The lookup runs once per draw, and the depth-prepass flow alternates
+     * colorMask/depthMask between its two passes for every single chunk section -
+     * so a cache-less implementation allocated two PipelineState objects per
+     * chunk, i.e. thousands of objects per frame, purely to re-derive states it
+     * had already built. These objects are immutable and their hash/equals are
+     * value-based, so they double as stable keys for the per-pipeline handle map.
+     */
+    private static final java.util.List<PipelineState> STATE_CACHE = new java.util.ArrayList<>(32);
+
+    private static final int MAX_CACHED_STATES = 64;
+
+    /**
+     * Opt-out for the input-snapshot memo (pass 10): {@code VULKANMOD_PIPESTATE=0}.
+     *
+     * <p>The lookup runs ~1800 times a frame - once per {@code apply()} through
+     * the reuse guard and once per {@code flushPipelineBind()} - and each call
+     * spent five state encodes (six blend fields, a depth switch, a logic-op
+     * switch) to produce an answer that only changes ~12 times a frame.
+     */
+    private static final boolean MEMO_DEFAULT = !"0".equals(System.getenv("VULKANMOD_PIPESTATE"));
+
+    /**
+     * Paired within-frame A/B ({@code VULKANMOD_MEMOAB=1}).
+     *
+     * <p>Exists because a two-launch A/B cannot resolve this change. Run
+     * back-to-back in one session the memo measured −69 ns/call; run in the
+     * reverse order it measured +23 ns/call. In both orders the <em>second</em>
+     * run was the faster one, i.e. the effect is smaller than the run-order
+     * effect, and the scene differs between launches (`iBatch`/`draws` are the
+     * documented drifting counters).
+     *
+     * <p>With this on, {@link #nextMemoArm()} is called once per
+     * {@code ShaderInstance.apply()} and the arm alternates per call, so the memo
+     * and the full encode see the same frame, the same sections, the same
+     * textures and the same cache state. The difference between the two arms'
+     * per-call cost is then a paired statistic with the scene cancelled out.
+     *
+     * <p>Caveat: the snapshot is recorded on every call in both arms (the memo
+     * arm needs it fresh), so this measures the encode+compare the memo removes,
+     * not the 17 stores it also skips in a real {@code PIPESTATE=0} build. It is
+     * therefore a conservative estimate.
+     */
+    private static final boolean MEMO_AB = "1".equals(System.getenv("VULKANMOD_MEMOAB"));
+
+    /**
+     * Whether the memo is consulted right now. Deliberately not {@code final}:
+     * the paired A/B flips it per call. In normal play it is a constant, and a
+     * non-final static boolean read is a single load either way.
+     */
+    private static boolean memoArmed = MEMO_DEFAULT;
+
+    public static boolean memoAbEnabled() {
+        return MEMO_AB;
+    }
+
+    /**
+     * Arm for this call, flipping the arm for the next. A/B only.
+     *
+     * <p>Flips <em>first</em> and returns the value now in effect, because
+     * {@link #getCurrentPipelineState} reads {@link #memoArmed} directly - the
+     * returned arm has to be the one the guard will actually see. Returning the
+     * previous value instead still alternates the two paths but silently swaps
+     * the arms' labels, which reads as the memo being 46 ns <em>slower</em>.
+     */
+    public static boolean nextMemoArm() {
+        memoArmed = !memoArmed;
+        return memoArmed;
+    }
+
+    /** True when the raw-input snapshot is worth maintaining at all. */
+    private static final boolean SNAPSHOT = MEMO_DEFAULT || MEMO_AB;
+
+    /**
+     * {@code VULKANMOD_PIPESTATE_VERIFY=1} re-derives the state on every memo hit
+     * and counts disagreements. This is the correctness instrument for the memo,
+     * and it is the only thing that can catch a missed input: run it once after
+     * touching anything that writes a GL pipeline-state value.
+     *
+     * <p>Only meaningful on its own - it makes the hit/derive counters nonsense
+     * because it drives both paths on every call.
+     */
+    private static final boolean MEMO_VERIFY = "1".equals(System.getenv("VULKANMOD_PIPESTATE_VERIFY"));
+
+    /**
+     * Snapshot of the raw GL inputs the last memoised result was derived from.
+     *
+     * <p>Why the raw inputs and not a version counter bumped from the setters:
+     * the fields below are <em>the</em> source of truth, so comparing them cannot
+     * miss an update however it was made. That matters here because
+     * {@code GlStateManagerMixin} writes {@code VRenderSystem.alphaTest},
+     * {@code .colorMask} and {@code .depthMask} <b>directly</b> (the cutout
+     * depth-prepass toggles them per section), bypassing every setter. A counter
+     * bumped only from {@code VRenderSystem} would have gone stale there and
+     * silently bound the wrong pipeline - exactly the bug class this project has
+     * hit before. The cost of the extra compares is ~10 ns/call, which is noise
+     * next to the encoding work it removes.
+     */
+    private static boolean memoValid;
+    private static RenderPass memoPass;
+    private static boolean sCull, sBlendEnabled, sDepthTest, sDepthMask, sLogicOp, sAlphaTest;
+    private static int sTopology, sPolygonMode, sBlendSrcRgb, sBlendDstRgb, sBlendSrcA, sBlendDstA,
+            sBlendOp, sColorMask, sDepthFun, sLogicOpFun;
+
     public static PipelineState getCurrentPipelineState(RenderPass renderPass) {
+        if (memoArmed && inputsUnchanged(renderPass)) {
+            com.yuhan123.vulkanmod.render.util.FrameProfiler.onPipelineStateMemoHit();
+
+            if (MEMO_VERIFY) {
+                // Capture the memo's answer first: derive() reassigns
+                // currentState, so comparing after the call would always agree
+                // and the check would be vacuous.
+                final PipelineState memoised = currentState;
+
+                if (derive(renderPass) != memoised) {
+                    com.yuhan123.vulkanmod.render.util.FrameProfiler.onPipelineStateMemoMismatch();
+                }
+            }
+
+            return currentState;
+        }
+
+        return derive(renderPass);
+    }
+
+    /**
+     * True when every input the memoised state was built from still holds the
+     * value it had then, against the same render pass. A false positive would
+     * draw with a stale pipeline, so every input is checked.
+     */
+    private static boolean inputsUnchanged(RenderPass renderPass) {
+        if (!memoValid || memoPass != renderPass) {
+            return false;
+        }
+
+        final BlendInfo b = blendInfo;
+
+        return sCull == VRenderSystem.cull
+               && sTopology == VRenderSystem.topology
+               && sPolygonMode == VRenderSystem.polygonMode
+               && sBlendEnabled == b.enabled
+               && sBlendSrcRgb == b.srcRgbFactor
+               && sBlendDstRgb == b.dstRgbFactor
+               && sBlendSrcA == b.srcAlphaFactor
+               && sBlendDstA == b.dstAlphaFactor
+               && sBlendOp == b.blendOp
+               && sColorMask == VRenderSystem.colorMask
+               && sDepthTest == VRenderSystem.depthTest
+               && sDepthMask == VRenderSystem.depthMask
+               && sDepthFun == VRenderSystem.depthFun
+               && sLogicOp == VRenderSystem.logicOp
+               && sLogicOpFun == VRenderSystem.logicOpFun
+               && sAlphaTest == VRenderSystem.alphaTest;
+    }
+
+    /** Records the inputs the result about to be produced is derived from. */
+    private static void recordSnapshot(RenderPass renderPass) {
+        final BlendInfo b = blendInfo;
+
+        sCull = VRenderSystem.cull;
+        sTopology = VRenderSystem.topology;
+        sPolygonMode = VRenderSystem.polygonMode;
+        sBlendEnabled = b.enabled;
+        sBlendSrcRgb = b.srcRgbFactor;
+        sBlendDstRgb = b.dstRgbFactor;
+        sBlendSrcA = b.srcAlphaFactor;
+        sBlendDstA = b.dstAlphaFactor;
+        sBlendOp = b.blendOp;
+        sColorMask = VRenderSystem.colorMask;
+        sDepthTest = VRenderSystem.depthTest;
+        sDepthMask = VRenderSystem.depthMask;
+        sDepthFun = VRenderSystem.depthFun;
+        sLogicOp = VRenderSystem.logicOp;
+        sLogicOpFun = VRenderSystem.logicOpFun;
+        sAlphaTest = VRenderSystem.alphaTest;
+
+        memoPass = renderPass;
+        memoValid = true;
+    }
+
+    /** The original lookup: five encodes, then the current-state and cache walks. */
+    private static PipelineState derive(RenderPass renderPass) {
         int assemblyRasterState = getAssemblyRasterState();
         int blendState = getBlendState();
         int currentColorMask = VRenderSystem.getColorMask();
@@ -25,10 +208,52 @@ public class PipelineState {
         int logicOp = getLogicOpState();
         boolean alphaTest = VRenderSystem.alphaTest;
 
-        if (currentState.checkEquals(assemblyRasterState, blendState, depthState, logicOp, currentColorMask, alphaTest, renderPass))
+        // The raw inputs are still exactly what the encodes above were built
+        // from, so this snapshot is consistent with the result below.
+        if (SNAPSHOT) {
+            recordSnapshot(renderPass);
+        }
+
+        if (currentState.checkEquals(assemblyRasterState, blendState, depthState, logicOp, currentColorMask, alphaTest, renderPass)) {
+            com.yuhan123.vulkanmod.render.util.FrameProfiler.onPipelineStateHit();
             return currentState;
-        else
-            return currentState = new PipelineState(assemblyRasterState, blendState, depthState, logicOp, currentColorMask, alphaTest, renderPass);
+        }
+
+        // The encodes above did not match the current state, so the cache is
+        // walked. Reaching here ~12 times a frame (against ~1800 calls) is the
+        // point of the memo above.
+        com.yuhan123.vulkanmod.render.util.FrameProfiler.onPipelineStateDerive();
+
+        for (int i = 0; i < STATE_CACHE.size(); ++i) {
+            PipelineState cached = STATE_CACHE.get(i);
+            if (cached.checkEquals(assemblyRasterState, blendState, depthState, logicOp, currentColorMask, alphaTest, renderPass)) {
+                return currentState = cached;
+            }
+        }
+
+        PipelineState created = new PipelineState(assemblyRasterState, blendState, depthState, logicOp, currentColorMask, alphaTest, renderPass);
+
+        // Bounded: the set of states the game actually uses is tiny, but a
+        // pathological sequence must not grow this without limit.
+        if (STATE_CACHE.size() < MAX_CACHED_STATES) {
+            STATE_CACHE.add(created);
+        }
+
+        return currentState = created;
+    }
+
+    /**
+     * Drops the cache. The cached states hold a hard reference to their
+     * RenderPass, which the swapchain recreation destroys, so the cache must not
+     * outlive it.
+     */
+    public static void clearStateCache() {
+        STATE_CACHE.clear();
+        currentState = DEFAULT;
+
+        // The memo's result references the destroyed pass, and its snapshot would
+        // otherwise look current against the new one.
+        memoValid = false;
     }
 
     public static int getBlendState() {
@@ -238,7 +463,7 @@ public class PipelineState {
                 case 775 -> VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
                 case 769 -> VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
                 case 774 -> VK_BLEND_FACTOR_DST_COLOR;
-                case 768 -> VK_BLEND_FACTOR_SRC_COLOR;
+                case 768, 772 -> VK_BLEND_FACTOR_SRC_COLOR;
                 default -> throw new RuntimeException("unknown blend factor: " + value);
 
 

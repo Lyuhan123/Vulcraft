@@ -42,7 +42,23 @@ public class DefaultMainPass implements MainPass {
         RenderPass.Builder builder = RenderPass.builder(this.mainFramebuffer);
         builder.getColorAttachmentInfo().setFinalLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         builder.getColorAttachmentInfo().setOps(VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE);
-        builder.getDepthAttachmentInfo().setOps(VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE);
+        // Depth MUST be cleared, not DONT_CARE.
+        //
+        // DONT_CARE means "the previous contents do not matter, do not load them",
+        // which leaves the depth buffer holding whatever the driver last left in
+        // that memory - for a freshly acquired swapchain image, undefined. Vanilla
+        // GL relies on EntityRenderer clearing depth once per frame and the terrain
+        // then writing real depth; every later pass (entities, particles, block
+        // entities, the hand) depth-tests against it. With DONT_CARE those later
+        // passes test against garbage, so fragments that should be hidden behind
+        // terrain pass the test - entities show through solid blocks.
+        //
+        // CLEAR is also the cheaper of the two correct options: it folds into the
+        // render pass itself (free on tiled GPUs, one fast depth clear elsewhere)
+        // and uses the clearValues already supplied in beginRenderPass. Switching
+        // to LOAD would instead require a separate vkCmdClearAttachments and would
+        // preserve stale depth from the previous frame.
+        builder.getDepthAttachmentInfo().setOps(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE);
 
         this.mainRenderPass = builder.build();
 

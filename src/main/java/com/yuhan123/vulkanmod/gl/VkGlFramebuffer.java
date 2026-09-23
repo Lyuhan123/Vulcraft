@@ -1,15 +1,24 @@
 package com.yuhan123.vulkanmod.gl;
 
+import org.lwjgl.system.MemoryUtil;
+
+import java.nio.ByteBuffer;
+
 import it.unimi.dsi.fastutil.ints.Int2ReferenceOpenHashMap;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
 import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import com.yuhan123.vulkanmod.vulkan.framebuffer.Framebuffer;
 import com.yuhan123.vulkanmod.vulkan.framebuffer.RenderPass;
+import com.yuhan123.vulkanmod.vulkan.framebuffer.SwapChain;
 import com.yuhan123.vulkanmod.vulkan.texture.ImageUtil;
 import com.yuhan123.vulkanmod.vulkan.texture.VulkanImage;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL30;
 
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_B8G8R8A8_SRGB;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_B8G8R8A8_UNORM;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_B8G8R8_SRGB;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_B8G8R8_UNORM;
 import static org.lwjgl.vulkan.VK11.VK_ATTACHMENT_LOAD_OP_LOAD;
 import static org.lwjgl.vulkan.VK11.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
@@ -234,6 +243,106 @@ public class VkGlFramebuffer {
 
     public RenderPass getRenderPass() {
         return renderPass;
+    }
+
+    /**
+     * Reads the bound framebuffer's colour attachment back into {@code dst}.
+     *
+     * glReadPixels was never implemented, so Minecraft's screenshot (F2) produced
+     * nothing and every visual question had to be answered by guessing. This
+     * downloads the colour attachment with vkCmdCopyImageToBuffer (hence the
+     * TRANSFER_SRC usage on the attachment) and copies it out.
+     *
+     * Vulkan images are stored top-down, GL's glReadPixels returns rows
+     * bottom-up, so the rows are flipped here to keep GL semantics; whatever the
+     * caller does with the result (vanilla's ScreenShotHelper, which knows about
+     * GL's order) then behaves as it expects.
+     *
+     * <p>The bytes come out in a fixed <b>R,G,B,A</b> contract regardless of the
+     * attachment's own channel order: a B8G8R8A8 attachment stores B,G,R,A, and
+     * handing that straight to a caller that expects RGBA is what made F2
+     * screenshots come back with red and blue swapped. Callers that asked GL for
+     * a different order (GL_BGRA, as vanilla's ScreenShotHelper does) convert
+     * from this contract in GL11Mixin.
+     *
+     * A one-shot path - it flushes uploads and waits on a fence - so it is
+     * deliberately not optimised. Never call it per frame.
+     */
+    public static void readPixels(int x, int y, int width, int height, ByteBuffer dst) {
+        if (dst == null)
+            return;
+
+        Framebuffer fb = Renderer.getInstance().getBoundFramebuffer();
+        VulkanImage image = fb != null ? fb.getColorAttachment() : null;
+
+        if (image == null) {
+            // No render pass is open. Vanilla's F2 path always runs with the main
+            // framebuffer bound, but a benchmark screenshot taken at frame start
+            // (see MinecraftMixin.takeScreenshot) does not - there the image the
+            // last frame rendered into is the swapchain's. The download below
+            // submits on the graphics queue and waits on its own fence, so it is
+            // ordered after the previous frame's render submission.
+            SwapChain swapChain = Renderer.getInstance().getSwapChain();
+            image = swapChain != null ? swapChain.getColorAttachment() : null;
+        }
+
+        if (image == null) {
+            while (dst.hasRemaining())
+                dst.put((byte) 0);
+            return;
+        }
+
+        final int imgW = image.width;
+        final int imgH = image.height;
+        final int bytes = image.formatSize;
+
+        // The attachment's own channel order. A B8G8R8A8 image (the swapchain on
+        // most Windows drivers) stores its bytes as B,G,R,A, so reading it back
+        // without swapping would hand the caller RGBA with red and blue
+        // exchanged. Normalise here so the contract above always holds.
+        final boolean bgra = isBGRFormat(image.format);
+
+        ByteBuffer tmp = MemoryUtil.memAlloc(imgW * imgH * bytes);
+
+        try {
+            ImageUtil.downloadTexture(image, MemoryUtil.memAddress0(tmp));
+
+            for (int row = 0; row < height && dst.remaining() >= bytes; ++row) {
+                final int srcRow = imgH - 1 - (y + row);
+
+                for (int col = 0; col < width && dst.remaining() >= bytes; ++col) {
+                    final int sx = x + col;
+
+                    if (srcRow < 0 || srcRow >= imgH || sx < 0 || sx >= imgW) {
+                        for (int b = 0; b < bytes; ++b)
+                            dst.put((byte) 0);
+                        continue;
+                    }
+
+                    final int si = (srcRow * imgW + sx) * bytes;
+                    if (bgra && bytes == 4) {
+                        // memory is B,G,R,A -> emit R,G,B,A
+                        dst.put(tmp.get(si + 2));
+                        dst.put(tmp.get(si + 1));
+                        dst.put(tmp.get(si));
+                        dst.put(tmp.get(si + 3));
+                    } else {
+                        for (int b = 0; b < bytes; ++b)
+                            dst.put(tmp.get(si + b));
+                    }
+                }
+            }
+        } finally {
+            MemoryUtil.memFree(tmp);
+        }
+    }
+
+    /** True for the 8-bit BGR-family formats, whose byte order is B,G,R,(A). */
+    private static boolean isBGRFormat(int format) {
+        return format == VK_FORMAT_B8G8R8A8_UNORM
+                || format == VK_FORMAT_B8G8R8A8_SRGB
+                || format == VK_FORMAT_B8G8R8_UNORM
+                || format == VK_FORMAT_B8G8R8_SRGB;
     }
 
     void cleanUp(boolean freeAttachments) {
