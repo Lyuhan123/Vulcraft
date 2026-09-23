@@ -119,7 +119,7 @@ unimined.minecraft {
             // is not guaranteed to inherit the environment of whichever shell
             // started the build - which would silently turn an A/B into two runs
             // of the same configuration. Forward them explicitly.
-            ['MIP', 'ALPHADILATE', 'DLMERGE', 'PREPASS', 'DRAWTIMING', 'PROFILE_DUMP',
+            ['MIP', 'ALPHADILATE', 'DLMERGE', 'DRAWTIMING', 'PROFILE_DUMP',
              'AUTOJOIN', 'AUTOQUIT', 'BENCH_SECONDS', 'SHOT', 'SHOT_TAG',
              'FRESH_WORLD', 'APPLYREUSE', 'REUSEALL',
              'FREEZE', 'PIPESTATE', 'PIPESTATE_VERIFY', 'MEMOAB', 'AB',

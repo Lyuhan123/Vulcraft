@@ -64,7 +64,6 @@ public abstract class ShaderLoadUtil {
                 pipelineBuilder.setFragShaderSPIRV(spirv);
                 pipelineBuilder.compileFragNoDiscardVariant(shaderName, source);
                 pipelineBuilder.compileFragEarlyTestVariant(shaderName, source);
-                pipelineBuilder.compileFragDepthOnlyVariant(shaderName, source);
             }
         }
     }

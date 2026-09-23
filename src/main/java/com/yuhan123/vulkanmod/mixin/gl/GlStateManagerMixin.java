@@ -40,27 +40,21 @@ import org.spongepowered.asm.mixin.injection.Redirect;
 
 @Mixin(GlStateManager.class)
 public class GlStateManagerMixin {
-   /**
-    * Cutout terrain draw mode.
-    *
-    * Default (single pass): one draw per chunk section, using the
-    * early_fragment_tests fragment variant with depth writes ON. The early depth
-    * test rejects overdrawn cutout fragments before the shader runs, which is
-    * the same early-Z benefit the two-pass flow buys - at half the draws, half
-    * the pipeline binds, half the push constants and half the vertex binds.
-    *
-    * The two-pass prepass is interleaved per chunk section (depth-only pass for
-    * chunk N, then the colour pass for chunk N), so it never writes more than one
-    * chunk's depth before that chunk's colour pass. Its entire benefit is
-    * therefore within-draw overdraw rejection, which an early_fragment_tests
-    * shader with depth writes enabled gets for free in a single draw.
-    *
-    * VULKANMOD_PREPASS=two (or =1) restores the original two-pass depth prepass;
-    * VULKANMOD_PREPASS=single (or =0, or unset) selects the single-pass mode.
-    */
-   private static final boolean PREPASS_TWO_PASS = "two".equals(System.getenv("VULKANMOD_PREPASS"))
-         || "1".equals(System.getenv("VULKANMOD_PREPASS"));
-   private static boolean PREPASS_LOGGED = false;
+    /**
+     * Cutout terrain draw mode.
+     *
+     * Single draw per chunk section. The fragment variant picked for
+     * "alpha test on + depth writes on" is the PLAIN module - early_fragment_tests
+     * is deliberately NOT attached, because it would write depth for fragments the
+     * shader then discards, punching the cutout mask into a per-texel stipple with
+     * sky bleeding through (the "tree-canopy sky punch-through" defect).
+     *
+     * VULKANMOD_EARLYCUTOUT=1 re-attaches early_fragment_tests as a diagnostic; it
+     * reintroduces the sky punch-through but confirms whether cutout overdraw is
+     * the GPU bottleneck. The two-pass depth prepass (VULKANMOD_PREPASS) was
+     * removed - see git history for the experiment.
+     */
+    private static boolean CUTOUT_PATH_LOGGED = false;
 
    // TEMPORARY (d15): draw-time depth-state probe for the "see through blocks"
    // report. Reads the layer published by RenderGlobalMixin and logs the actual
@@ -879,32 +873,15 @@ public class GlStateManagerMixin {
                         return;
                      }
 
-                     // Cutout terrain (alpha test on + BLOCK format) is drawn in
-                     // one of two ways.
-                     //
-                     // Default: a SINGLE draw. The fragment variant picked for
-                     // "alpha test on + depth writes on" is the
-                     // early_fragment_tests clone, so the depth test runs before
-                     // the shader and rejects overdrawn foliage fragments without
-                     // shading them - while still writing depth, so a surviving
-                     // fragment occludes the geometry drawn after it. Same
-                     // rendering as vanilla (one draw, alpha test, depth write),
-                     // with early-Z restored.
-                     //
-                     // VULKANMOD_PREPASS=two restores the original two-pass flow:
-                     // pass 1 writes depth only (colorMask off) with a cheap
-                     // depth-only shader; pass 2 re-draws with EQUAL compare and
-                     // depthMask off, which routes the shader to the
-                     // early_fragment_tests variant so overdrawn fragments are
-                     // rejected before the fragment shader runs. Without either
-                     // path the discard-based alpha test forces late tests and
-                     // every overlapping foliage fragment pays full shading.
-                     //
-                     // The depthMask check matters: for the translucent layer it
-                     // is already off, so a depth prepass would be a pure no-op
-                     // draw (writes neither colour nor depth) - fall through to the
-                     // single draw and let it use the early_fragment_tests variant
-                     // against the opaque depth.
+                     // Cutout terrain (alpha test on + BLOCK format) is drawn in a
+                     // single draw. The fragment variant for "alpha test on + depth
+                     // writes on" is the PLAIN module: early_fragment_tests is NOT
+                     // attached, because it would write depth for fragments the
+                     // shader then discards, punching the cutout mask into a
+                     // per-texel stipple with sky bleeding through (the
+                     // "tree-canopy sky punch-through" defect). VULKANMOD_EARLYCUTOUT=1
+                     // re-attaches it as a diagnostic (reintroduces that defect).
+                     // The two-pass depth prepass was removed - see git history.
                      // NOTE: buildFormatFromPointers() constructs a fresh
                      // VertexFormat per pointer state, so identity comparison
                      // against DefaultVertexFormats.BLOCK never matches -- compare
@@ -912,44 +889,10 @@ public class GlStateManagerMixin {
                      final boolean blockFormat = vertexFormat.getSize() == DefaultVertexFormats.BLOCK.getSize()
                            && vertexFormat.getElementCount() == DefaultVertexFormats.BLOCK.getElementCount();
 
-                     // Logged unconditionally (not per branch) so a benchmark run can
-                     // confirm both the resolved mode and the raw env var value the
-                     // client process actually received.
-                     if (!PREPASS_LOGGED && blockFormat && VRenderSystem.alphaTest && VRenderSystem.depthMask) {
-                        PREPASS_LOGGED = true;
-                        VulkanMod.LOGGER.info("[VKPROF] cutout path: {} (VULKANMOD_PREPASS={})",
-                              PREPASS_TWO_PASS ? "two-pass depth prepass" : "single-pass early-Z",
-                              System.getenv("VULKANMOD_PREPASS"));
-                     }
-
-                     if (PREPASS_TWO_PASS && VRenderSystem.alphaTest && VRenderSystem.depthMask && blockFormat) {
-
-                        int savedColorMask = VRenderSystem.colorMask;
-                        boolean savedDepthMask = VRenderSystem.depthMask;
-
-                        // Pass 1: depth only. The pipeline must be re-bound here:
-                        // apply() already bound the full-colorMask handle, and the
-                        // state change below is only picked up on the next bind.
-                        // rebindPipelineOnly() skips the uniform upload and
-                        // descriptor re-bind -- apply() just bound them and the
-                        // pipeline layout is unchanged.
-                        VRenderSystem.colorMask = 0;
-                        shader.rebindPipelineOnly();
-                        drawChunk(glBuffer, persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
-
-                        // Pass 2: colour. colorMask MUST be restored BEFORE this
-                        // bind -- otherwise the colour pass binds the colorMask=0
-                        // pipeline and the cutout geometry outputs nothing at all
-                        // (invisible leaves / grass). depthMask stays off so the
-                        // early_fragment_tests variant is selected and discard
-                        // cannot corrupt the prepass-written depth.
-                        VRenderSystem.colorMask = savedColorMask;
-                        VRenderSystem.depthMask = false;
-                        shader.rebindPipelineOnly();
-                        drawChunk(glBuffer, persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
-
-                        VRenderSystem.depthMask = savedDepthMask;
-                        return;
+                     if (!CUTOUT_PATH_LOGGED && blockFormat && VRenderSystem.alphaTest && VRenderSystem.depthMask) {
+                        CUTOUT_PATH_LOGGED = true;
+                        VulkanMod.LOGGER.info("[VKPROF] cutout path: single-pass early-Z{}",
+                              System.getenv("VULKANMOD_EARLYCUTOUT") != null ? " (VULKANMOD_EARLYCUTOUT)" : "");
                      }
 
                      if (VULKANMOD_DEPTHXRAY_DRAW) { vulkanmod$xrayDrawDepth(); }
