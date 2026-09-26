@@ -5,17 +5,6 @@
   "target": "@env(DEFAULT)",
   "client": [
     "MinecraftMixin",
-    "EntityRendererMixin",
-    "ChunkMixin",
-    "RenderGlobalMixin",
-    "RenderManagerMixin",
-    "RenderLivingBaseMixin",
-    "CompiledChunkMixin",
-    "ContainerInfoAccessor",
-    "SetVisibilityMixin",
-    "FrustumMixin",
-    "ViewFrustumAccessor",
-    "VisGraphMixin",
     "gl.GlAllocationMixin",
     "gl.GlStateManagerMixin",
     "gl.OpenGlHelperMixin",
@@ -28,7 +17,6 @@
     "vertex.TessellatorMixin"
   ],
   "mixins": [
-    "ProfilerMixin",
     "forge.ForgeHooksClientMixin",
     "forge.SplashProgressMixin",
     "gl.GL11Mixin",
