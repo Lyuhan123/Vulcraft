@@ -802,14 +802,64 @@ public class GlStateManagerMixin {
    }
 
    /**
+    * DRAW-SPLIT microbenchmark (controlled draw-count vs fixed geometry).
+    *
+    * <p>Set via {@code -Dvulkanmod.drawSplit=N} (daemon-safe) or {@code VULKANMOD_DRAW_SPLIT=N}
+    * (export, then kill the gradle daemon so it inherits the env). N re-issues each
+    * chunk section as N draws over the SAME vertex range (firstVertex carries the
+    * slice offset), so total geometry is unchanged and only the draw-call count scales.
+    *
+    * <p>If fps drops as N grows, per-draw CPU command cost is real and draw-count
+    * reduction (merge/indirect) is a lever. If fps is flat, draw-call count is not
+    * the bottleneck. Default 1 = byte-identical to the normal path.
+    */
+   @Unique
+   private static final int DRAW_SPLIT = parseDrawSplit();
+   @Unique
+   private static int parseDrawSplit() {
+      String v = System.getProperty("vulkanmod.drawSplit");
+      if (v == null) v = System.getenv("VULKANMOD_DRAW_SPLIT");
+      if (v == null || v.isEmpty()) return 1;
+      try {
+         int n = Integer.parseInt(v.trim());
+         return n >= 1 ? n : 1;
+      } catch (NumberFormatException e) {
+         return 1;
+      }
+   }
+   @Unique
+   private static boolean DRAW_SPLIT_LOGGED;
+
+   /**
     * Draws one chunk section from its dedicated persistent vertex buffer.
     *
-    * (The former shared-slab arena path was removed; every section draws
-    * directly from its own buffer.)
+    * <p>(The arena pooling experiment was removed; terrain batching now goes
+    * through the copied upstream {@code render.chunk} draw path.)
     */
    @Unique
    private static void drawChunk(VkGlBuffer glBuffer, VertexBuffer persistent, int byteOffset,
                                  int mode, VertexFormat vertexFormat, int vertexCount) {
+      if (DRAW_SPLIT > 1) {
+         if (!DRAW_SPLIT_LOGGED) {
+            DRAW_SPLIT_LOGGED = true;
+            VulkanMod.LOGGER.info("[VKPROF] DRAW_SPLIT={} active: each chunk section re-issued as {} draws, geometry unchanged",
+                  DRAW_SPLIT, DRAW_SPLIT);
+         }
+         if (vertexCount > DRAW_SPLIT) {
+            final int stride = vertexFormat.getSize();
+            int slice = vertexCount / DRAW_SPLIT;
+            int off = byteOffset;
+            int rem = vertexCount;
+            for (int k = 0; k < DRAW_SPLIT; k++) {
+               int vc = (k == DRAW_SPLIT - 1) ? rem : slice;
+               if (vc <= 0) break;
+               Renderer.getDrawer().drawPersistent(persistent, off, mode, vertexFormat, vc);
+               off += (long) vc * stride;
+               rem -= vc;
+            }
+            return;
+         }
+      }
       Renderer.getDrawer().drawPersistent(persistent, byteOffset, mode, vertexFormat, vertexCount);
    }
 
@@ -861,9 +911,6 @@ public class GlStateManagerMixin {
                   // copying the whole range into the per-frame vertex buffer.
                   VertexBuffer persistent = glBuffer.getPersistentVertexBuffer();
 
-                  // TEMPORARY: chunk-draw pipeline census - see TextureProbe.
-                  com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onChunkDraw(
-                        shader.getName(), vertexFormat.getSize(), vertexFormat.getElementCount(), p_187439_2_);
 
                   if (persistent != null && persistent.getBufferSize() >= bytesNeeded) {
                      if (com.yuhan123.vulkanmod.gl.DisplayListManager.isRecordingList()) {
@@ -895,9 +942,10 @@ public class GlStateManagerMixin {
                               System.getenv("VULKANMOD_EARLYCUTOUT") != null ? " (VULKANMOD_EARLYCUTOUT)" : "");
                      }
 
-                     if (VULKANMOD_DEPTHXRAY_DRAW) { vulkanmod$xrayDrawDepth(); }
-                     drawChunk(glBuffer, persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
-                     return;
+                    if (VULKANMOD_DEPTHXRAY_DRAW) { vulkanmod$xrayDrawDepth(); }
+
+                    drawChunk(glBuffer, persistent, byteOffset, p_187439_0_, vertexFormat, p_187439_2_);
+                    return;
                   }
 
                   data = glBuffer.getData();
@@ -909,6 +957,8 @@ public class GlStateManagerMixin {
                      return;
                   }
 
+                  // Reached when persistent == null or too small - copies the
+                  // vertex range into the per-frame buffer.
                   Renderer.getDrawer().draw(data, p_187439_0_, vertexFormat, p_187439_2_);
                }
             }

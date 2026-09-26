@@ -1749,6 +1749,7 @@ public class RenderGlobalMixin {
         // Pass 16c: HEAD is counted separately from RETURN, and the second entry
         // inside one renderWorldPass dumps its caller (bounded to 3 dumps).
         FrameProfiler.onRenderEntitiesHead();
+
     }
 
     @Inject(method = "renderEntities(Lnet/minecraft/entity/Entity;"

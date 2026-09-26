@@ -355,6 +355,21 @@ public abstract class VRenderSystem {
         return MVP;
     }
 
+    private static final Matrix4f MVP_MATRIX = new Matrix4f();
+
+    /**
+     * Current MVP (projection * modelview, with any per-section translate baked
+     * in) as a reusable {@link Matrix4f}, column-major like the MVP buffer. The
+     * batch path reads it synchronously, so returning one shared instance is
+     * safe.
+     */
+    public static Matrix4f getMVPMatrix() {
+        flushMVP();
+        MVP_FB.clear();
+        MVP_MATRIX.set(MVP_FB);
+        return MVP_MATRIX;
+    }
+
     /**
      * Rewound views over the backing buffers. Callers reuse them instead of
      * calling ByteBuffer.asFloatBuffer(), which allocates a new FloatBuffer

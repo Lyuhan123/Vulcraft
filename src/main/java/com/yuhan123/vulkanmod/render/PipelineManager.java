@@ -32,11 +32,6 @@ import java.util.function.Supplier;
 import static net.minecraft.client.renderer.vertex.DefaultVertexFormats.*;
 import static org.apache.commons.compress.harmony.archive.internal.nls.Messages.getString;
 
-//import net.minecraft.client.renderer.RenderType;
-//import com.yuhan123.vulkanmod.render.chunk.build.thread.ThreadBuilderPack;
-//import com.yuhan123.vulkanmod.render.vertex.CustomVertexFormat;
-//import com.yuhan123.vulkanmod.render.vertex.TerrainRenderType;
-
 public abstract class PipelineManager {
 
 
@@ -176,9 +171,19 @@ public abstract class PipelineManager {
      * {@code Matrices} binding stayed uninitialised.
      */
     private static GraphicsPipeline createPipeline(String configName, VertexFormat vertexFormat) {
+        return createPipeline(configName, vertexFormat, true);
+    }
+
+    /**
+     * @param register when true, the resulting shader is published to
+     *                 {@link #shaderMap} so {@code chooseShader} can find it by
+     *                 vertex format.
+     */
+    private static GraphicsPipeline createPipeline(String configName, VertexFormat vertexFormat, boolean register) {
         try {
             ShaderInstance shader = new ShaderInstance(configName, vertexFormat);
-            shaderMap.put(vertexFormat, shader);
+            if (register)
+                shaderMap.put(vertexFormat, shader);
 
             GraphicsPipeline pipeline = shader.getPipeline();
 

@@ -216,16 +216,16 @@ public abstract class ImageUtil {
     /**
      * Builds the mip chain by successive {@code vkCmdBlitImage} halvings.
      *
-     * <p><b>MEASURED: this method is NOT the cause of the canopy/grass defects.</b>
-     * A verified-correct rewrite (real image layouts, whole-chain barriers, mip 0
-     * included in the final transition) was implemented and A/B tested; the sky
-     * punch-through in the canopy measured <b>28.7% before and 28.7% after</b>
-     * (3618 vs 3615 sky pixels over the identical 12600-pixel box). The rewrite
-     * was reverted rather than kept, because "the code looks wrong" is not
-     * evidence, and this A/B is direct evidence that it does not matter here.
-     *
-     * <p>The rewrite is preserved in the project's memory notes so that if a mip
-     * problem is ever <i>measured</i>, the correct implementation is available.
+     * <p><b>LAYOUT CORRECTNESS - driver-fatal on NVIDIA.</b> Each blit reads its
+     * source level as {@code TRANSFER_SRC_OPTIMAL}; the final level stays
+     * {@code TRANSFER_DST_OPTIMAL}. The whole-chain final transition MUST use the
+     * matching per-group oldLayout, otherwise the barrier's oldLayout disagrees
+     * with the level's real layout and {@code VUID-VkImageMemoryBarrier-oldLayout-01197}
+     * fires. On an RTX 3080 this escalates to a driver access violation
+     * (EXCEPTION_ACCESS_VIOLATION inside nvoglv64.dll) that kills the JVM at the
+     * title screen. Intel Iris Xe tolerated the mismatch, which is why this was
+     * previously mis-scoped as "visual-only" and the correct version was
+     * reverted. Keep this correct: the NVIDIA crash depends on it.
      */
     public static void generateMipmaps(VulkanImage image) {
         // Base level must be uploaded before blitting mip levels.
@@ -283,30 +283,56 @@ public abstract class ImageUtil {
                                image.getId(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, blit, VK_FILTER_LINEAR);
             }
 
-            VkImageMemoryBarrier.Buffer toRead = VkImageMemoryBarrier.calloc(1, stack);
-            toRead.sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-            toRead.oldLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            toRead.newLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            toRead.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
-            toRead.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
-            toRead.image(image.getId());
-            toRead.subresourceRange().baseMipLevel(0);
-            // Whole chain: levelCount was mipLevels - 1, which left the last
-            // level in TRANSFER_DST_OPTIMAL - sampling it is a layout
-            // violation (and reads uninitialised data on the levels that were
-            // never blitted).
-            toRead.subresourceRange().levelCount(image.mipLevels);
-            toRead.subresourceRange().baseArrayLayer(0);
-            toRead.subresourceRange().layerCount(VK_REMAINING_ARRAY_LAYERS);
-            toRead.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT);
-            toRead.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
-            toRead.dstAccessMask(VK_ACCESS_SHADER_READ_BIT);
+            // Final transition to SHADER_READ_ONLY. The blitted source levels
+            // (0 .. mipLevels-2) are TRANSFER_SRC_OPTIMAL; the last level
+            // (mipLevels-1) is TRANSFER_DST_OPTIMAL. Use one barrier per group
+            // with the CORRECT oldLayout - a single whole-chain barrier with
+            // oldLayout=TRANSFER_DST_OPTIMAL is a layout mismatch
+            // (VUID-VkImageMemoryBarrier-oldLayout-01197) that crashes NVIDIA.
+            if (image.mipLevels > 1) {
+                VkImageMemoryBarrier.Buffer toReadSrc = VkImageMemoryBarrier.calloc(1, stack);
+                toReadSrc.sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
+                toReadSrc.oldLayout(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                toReadSrc.newLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                toReadSrc.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+                toReadSrc.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+                toReadSrc.image(image.getId());
+                toReadSrc.subresourceRange().baseMipLevel(0);
+                toReadSrc.subresourceRange().levelCount(image.mipLevels - 1);
+                toReadSrc.subresourceRange().baseArrayLayer(0);
+                toReadSrc.subresourceRange().layerCount(VK_REMAINING_ARRAY_LAYERS);
+                toReadSrc.subresourceRange().aspectMask(image.aspect);
+                toReadSrc.srcAccessMask(VK_ACCESS_TRANSFER_READ_BIT);
+                toReadSrc.dstAccessMask(VK_ACCESS_SHADER_READ_BIT);
+                vkCmdPipelineBarrier(commandBuffer.getHandle(),
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                     0, null, null, toReadSrc);
+            }
 
+            // Last level: TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL.
+            VkImageMemoryBarrier.Buffer toReadDst = VkImageMemoryBarrier.calloc(1, stack);
+            toReadDst.sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
+            toReadDst.oldLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            toReadDst.newLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            toReadDst.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+            toReadDst.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
+            toReadDst.image(image.getId());
+            toReadDst.subresourceRange().baseMipLevel(image.mipLevels - 1);
+            toReadDst.subresourceRange().levelCount(1);
+            toReadDst.subresourceRange().baseArrayLayer(0);
+            toReadDst.subresourceRange().layerCount(VK_REMAINING_ARRAY_LAYERS);
+            toReadDst.subresourceRange().aspectMask(image.aspect);
+            toReadDst.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
+            toReadDst.dstAccessMask(VK_ACCESS_SHADER_READ_BIT);
             vkCmdPipelineBarrier(commandBuffer.getHandle(),
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                 0, null, null, toRead);
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 0, null, null, toReadDst);
 
-            image.readOnlyLayout();
+            // Update the whole-image layout tracker directly - do NOT call
+            // readOnlyLayout() here: it emits a whole-chain barrier with the
+            // stale TRANSFER_DST oldLayout (the very mismatch we just fixed)
+            // on the renderer's command buffer.
+            image.setCurrentLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
             long fence = DeviceManager.getGraphicsQueue().submitCommands(commandBuffer);
 

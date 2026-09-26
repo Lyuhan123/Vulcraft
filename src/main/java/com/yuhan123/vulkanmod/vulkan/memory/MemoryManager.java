@@ -1,6 +1,7 @@
 package com.yuhan123.vulkanmod.vulkan.memory;
 
 import com.yuhan123.vulkanmod.VulkanMod;
+import com.yuhan123.vulkanmod.render.chunk.buffer.AreaBuffer;
 import it.unimi.dsi.fastutil.longs.Long2ReferenceOpenHashMap;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 //import com.yuhan123.vulkanmod.render.chunk.buffer.AreaBuffer;
@@ -49,7 +50,7 @@ public class MemoryManager {
     private final ObjectArrayList<VulkanImage>[] freeableImages = new ObjectArrayList[Frames];
 
     private final ObjectArrayList<Runnable>[] frameOps = new ObjectArrayList[Frames];
-//    private final ObjectArrayList<Pair<AreaBuffer, Integer>>[] segmentsToFree = new ObjectArrayList[Frames];
+    private final ObjectArrayList<Pair<AreaBuffer, Integer>>[] segmentsToFree = new ObjectArrayList[Frames];
 
     //debug
     private ObjectArrayList<StackTraceElement[]>[] stackTraces;
@@ -70,7 +71,7 @@ public class MemoryManager {
             this.freeableImages[i] = new ObjectArrayList<>();
 
             this.frameOps[i] = new ObjectArrayList<>();
-//            this.segmentsToFree[i] = new ObjectArrayList<>();
+            this.segmentsToFree[i] = new ObjectArrayList<>();
         }
 
         if (DEBUG) {
@@ -86,7 +87,7 @@ public class MemoryManager {
         this.freeBuffers(frame);
         this.freeImages(frame);
         this.doFrameOps(frame);
-//        this.freeSegments(frame);
+        this.freeSegments(frame);
     }
 
     public void setCurrentFrame(int frame) {
@@ -300,18 +301,18 @@ public class MemoryManager {
         }
     }
 
-//    private void freeSegments(int frame) {
-//        var list = this.segmentsToFree[frame];
-//        for (var pair : list) {
-//            pair.first.setSegmentFree(pair.second);
-//        }
-//
-//        list.clear();
-//    }
+    private void freeSegments(int frame) {
+        var list = this.segmentsToFree[frame];
+        for (var pair : list) {
+            pair.first.setSegmentFree(pair.second);
+        }
 
-//    public void addToFreeSegment(AreaBuffer areaBuffer, int offset) {
-//        this.segmentsToFree[this.currentFrame].add(new Pair<>(areaBuffer, offset));
-//    }
+        list.clear();
+    }
+
+    public void addToFreeSegment(AreaBuffer areaBuffer, int offset) {
+        this.segmentsToFree[this.currentFrame].add(new Pair<>(areaBuffer, offset));
+    }
 
     public int getNativeMemoryMB() {
         return bytesInMb(nativeMemory);

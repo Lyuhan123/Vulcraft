@@ -124,6 +124,11 @@ public class DefaultMainPass implements MainPass {
 
         Renderer.getInstance().endRenderPass(commandBuffer);
 
+        // Experiment B: mark the boundary between the offscreen pass we just
+        // closed and the main swapchain pass (aux) we are about to resume. The
+        // segment that follows is main-pass GPU work.
+        Renderer.getInstance().writeGpuTimestamp(commandBuffer, Renderer.GPU_TS_MAIN);
+
         try (MemoryStack stack = MemoryStack.stackPush()) {
             swapChain.beginRenderPass(commandBuffer, this.auxRenderPass, stack);
         }

@@ -3,8 +3,6 @@ package com.yuhan123.vulkanmod.gl;
 import com.yuhan123.vulkanmod.vulkan.memory.MemoryTypes;
 import com.yuhan123.vulkanmod.vulkan.memory.buffer.VertexBuffer;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceOpenHashMap;
-import org.lwjgl.opengl.GL15;
-import org.lwjgl.opengl.GL32;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
@@ -207,9 +205,6 @@ public class VkGlBuffer {
 
         VertexBuffer old = this.vertexBuffer;
 
-        // The dedicated buffer is created even with the arena enabled: it costs
-        // one allocation per VBO (not per frame) and it is what the draw falls
-        // back to if the arena is full or the stride turns out to be unpoolable.
         try {
             VertexBuffer buffer = new VertexBuffer(size, MemoryTypes.HOST_MEM);
             buffer.copyBuffer(this.data, size);

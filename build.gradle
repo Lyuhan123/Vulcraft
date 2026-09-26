@@ -138,7 +138,7 @@ unimined.minecraft {
              'TILEIDX', 'TILEIDX_VERIFY',
              'BENCH_POS', 'BENCH_YAW', 'BENCH_PITCH', 'BENCH_CHEST', 'NOCULL', 'DEPTHBIAS',
              'NOMIP', 'EARLYCUTOUT', 'THIRDPERSON', 'NOENTDRAW', 'DLPULL', 'XFPROBE',
-             'SKIPLAYER'].each { name ->
+             'SKIPLAYER', 'ARENA'].each { name ->
                 def key = "VULKANMOD_${name}"
                 def value = System.getenv(key)
                 if (value != null) {

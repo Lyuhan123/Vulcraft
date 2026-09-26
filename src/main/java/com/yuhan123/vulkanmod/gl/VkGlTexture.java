@@ -37,7 +37,6 @@ public class VkGlTexture {
     private static VkGlTexture boundTexture;
     private static int activeTexture = 0;
 
-    /** TEMPORARY: diagnostics only - see TextureProbe. */
     public static int getBoundTextureId() {
         return boundTextureId;
     }
@@ -211,23 +210,19 @@ public class VkGlTexture {
             // deletes and re-binds the id, then uploadTextureImageSub binds it
             // again; if the second bind cannot find the entry, the exception
             // propagates out of loadTexture and the image stays empty forever.
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onBindMissing(id, activeTexture);
             throw new NullPointerException("bound texture is null" + id);
         }
 
         VulkanImage vulkanImage = boundTexture.vulkanImage;
         if (vulkanImage != null) {
             VTextureSelector.bindTexture(activeTexture, vulkanImage);
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onGlBind(id, activeTexture, vulkanImage);
 
             // 1.12.2 binds the lightmap at GL_TEXTURE1 (OpenGlHelper.lightmapTexUnit = 33985),
             // but the block/item shaders sample it from slot 2 (Sampler2 -> imageIdx 2).
             if (activeTexture == 1) {
                 VTextureSelector.setLightTexture(vulkanImage);
-                com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onLightmapSet(id, vulkanImage);
             }
         } else {
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onGlBind(id, activeTexture, null);
         }
     }
 
@@ -277,7 +272,6 @@ public class VkGlTexture {
             // TEMPORARY: the delete path frees the image but leaves any sampler
             // slot that still references it pointing at freed memory. Log it so
             // the probe can tell whether a black draw is sampling a dead image.
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onDelete(i, image);
             MemoryManager.getInstance().addToFreeable(image);
         }
     }
@@ -305,9 +299,6 @@ public class VkGlTexture {
 
         // TEMPORARY: report the ALLOCATE step. uploadSubImage only fires when
         // bytes are written, so an image that is allocated and then never filled
-        // is invisible to that probe. See TextureProbe.
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onAllocate(
-                boundTexture.id, width, height, level, pixels != 0L);
 
         boundTexture.updateParams(level, width, height, internalFormat, type);
         boundTexture.allocateIfNeeded();
@@ -321,8 +312,6 @@ public class VkGlTexture {
         if (checkParams(level, width, height))
             return;
 
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onAllocate(
-                boundTexture.id, width, height, level, pixels != null);
 
         boundTexture.updateParams(level, width, height, internalFormat, type);
         boundTexture.allocateIfNeeded();
@@ -359,13 +348,8 @@ public class VkGlTexture {
         }
 
         if (src != null) {
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onSubImageAttempt(
-                    boundTexture.id, level, xOffset, yOffset, width, height, format, "ok");
             boundTexture.uploadSubImage(level, xOffset, yOffset, width, height, format, src);
         } else {
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onSubImageAttempt(
-                    boundTexture.id, level, xOffset, yOffset, width, height, format,
-                    glBuffer != null ? "punp-null" : (pixels != 0L ? "long-null" : "null-ptr"));
         }
     }
 
@@ -391,15 +375,8 @@ public class VkGlTexture {
         }
 
         if (src != null) {
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onSubImageAttempt(
-                    boundTexture.id, level, xOffset, yOffset, width, height, format, "ok");
             boundTexture.uploadSubImage(level, xOffset, yOffset, width, height, format, src);
         } else {
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onSubImageAttempt(
-                    boundTexture.id, level, xOffset, yOffset, width, height, format,
-                    glBuffer != null ? "punp-int" : "intbuf-empty(pos="
-                            + (pixels == null ? "-" : pixels.position()) + ",cap="
-                            + (pixels == null ? "-" : pixels.capacity()) + ")");
         }
     }
 
@@ -432,13 +409,8 @@ public class VkGlTexture {
         }
 
         if (src != null) {
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onSubImageAttempt(
-                    boundTexture.id, level, xOffset, yOffset, width, height, format, "ok");
             boundTexture.uploadSubImage(level, xOffset, yOffset, width, height, format, src);
         } else {
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onSubImageAttempt(
-                    boundTexture.id, level, xOffset, yOffset, width, height, format,
-                    glBuffer != null ? "punp-bb" : "bb-null");
         }
     }
 
@@ -661,18 +633,10 @@ public class VkGlTexture {
     }
 
     private void uploadSubImage(int level, int xOffset, int yOffset, int width, int height, int format, ByteBuffer pixels) {
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onUploadEnter(
-                this.id, level, width, height, format, pixels == null ? -1 : pixels.capacity());
         if (level == 0 && xOffset == 0 && yOffset == 0) {
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.dumpSkin(this.id, width, height, pixels);
         }
-        // TEMPORARY: atlas alpha histogram - see TextureProbe.dumpAtlas.
         if (level == 0 && pixels != null) {
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.dumpAtlas(this.id, width, height, pixels);
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.dumpLightmap(this.id, width, height, pixels);
             // TEMPORARY: stitch the terrain atlas from its per-sprite sub-uploads.
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.stitchAtlas(
-                    this.id, xOffset, yOffset, width, height, pixels);
         }
         ByteBuffer src;
         final long swzT = FrameProfiler.texStart();
@@ -706,9 +670,6 @@ public class VkGlTexture {
         // TEMPORARY: report what the upload actually contains. A mob that binds
         // the right image and a white ColorModulator but still draws black can
         // only be explained by the bytes: zeroes, or a layout the sampler cannot
-        // decode. See TextureProbe.
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onUpload(
-                this.id, width, height, format, src);
 
         final long upT = FrameProfiler.texStart();
         this.vulkanImage.uploadSubTextureAsync(level, width, height, xOffset, yOffset, 0, 0, unpackRowLength, src);

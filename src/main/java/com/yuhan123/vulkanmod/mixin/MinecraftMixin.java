@@ -940,9 +940,6 @@ public class MinecraftMixin {
                         dumpProfiler(mc);
                     }
                     VulkanMod.LOGGER.info("[VKPROF] auto-quit after {}s in world", BENCH_MILLIS / 1000L);
-                    // TEMPORARY: lightmap-slot probe - see TextureProbe.
-                    com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.reportLightmapSlot();
-                    com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.writeAtlases();
                     mc.shutdown();
                 }
             }

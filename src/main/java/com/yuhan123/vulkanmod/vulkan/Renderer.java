@@ -158,9 +158,23 @@ public class Renderer {
      * the slot is re-acquired). Feeds FrameProfiler's gpuPass metric so real
      * GPU pass time shows up in the [VKPROF] report without RenderDoc.
      */
-    private static final int GPU_QUERY_COUNT = 2;
+    /**
+     * GPU timestamp queries around the render passes. Bumped from 2 to 24 so the
+     * Experiment-B breakdown can record a timestamp at every render-pass boundary
+     * (frame start + one per pass switch + frame end). Each frame slot keeps its
+     * own count/labels so the deferred read (3 frames later, after the fence)
+     * stays coherent under triple-buffering.
+     */
+    private static final int GPU_QUERY_COUNT = 24;
     private long[] gpuQueryPools;
     private double timestampPeriodNanos;
+
+    // Experiment B — per-render-pass GPU breakdown.
+    public static final byte GPU_TS_MAIN = 0; // main swapchain color pass
+    public static final byte GPU_TS_OFF = 1;  // offscreen framebuffer pass
+    public static final byte GPU_TS_END = 2;  // frame-end sentinel (no segment)
+    private int[] gpuTimestampCount;
+    private byte[][] gpuTimestampLabels;
 
     public Renderer() {
         device = Vulkan.getVkDevice();
@@ -198,6 +212,8 @@ public class Renderer {
         this.timestampPeriodNanos = DeviceManager.deviceProperties.limits().timestampPeriod();
 
         this.gpuQueryPools = new long[framesNum];
+        this.gpuTimestampCount = new int[framesNum];
+        this.gpuTimestampLabels = new byte[framesNum][GPU_QUERY_COUNT];
 
         try (MemoryStack stack = stackPush()) {
             VkQueryPoolCreateInfo poolInfo = VkQueryPoolCreateInfo.calloc(stack);
@@ -217,9 +233,32 @@ public class Renderer {
         }
     }
 
-    /** Reads the finished timestamp pair of this frame slot (fence already signaled). */
+    /**
+     * Experiment B: record one GPU timestamp into the current frame slot's query
+     * pool at a render-pass boundary, tagging it with a category so the per-frame
+     * GPU time can later be split into pass segments. A cheap vkCmdWriteTimestamp;
+     * writes are capped at {@link #GPU_QUERY_COUNT} per frame.
+     */
+    public void writeGpuTimestamp(VkCommandBuffer cb, byte label) {
+        if (gpuQueryPools == null)
+            return;
+        int slot = currentFrame;
+        int idx = gpuTimestampCount[slot];
+        if (idx >= GPU_QUERY_COUNT)
+            return;
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuQueryPools[slot], idx);
+        gpuTimestampLabels[slot][idx] = label;
+        gpuTimestampCount[slot] = idx + 1;
+    }
+
+    /** Reads the finished timestamp set of this frame slot (fence already signaled). */
     private void fetchGpuPassNanos(int frameSlot) {
         if (this.gpuQueryPools == null) {
+            return;
+        }
+
+        int n = gpuTimestampCount[frameSlot];
+        if (n < 2) {
             return;
         }
 
@@ -230,19 +269,46 @@ public class Renderer {
             // the game before the first frame. The fence only guarantees results
             // when the slot's last submission actually recorded the queries, so
             // VK_NOT_READY is a normal "nothing to report" and just skips.
-            int result = vkGetQueryPoolResults(device, this.gpuQueryPools[frameSlot], 0, GPU_QUERY_COUNT,
+            // Query exactly the n slots that were written this frame, NOT the full
+            // GPU_QUERY_COUNT pool. Unwritten (reset-but-empty) slots report
+            // VK_NOT_READY, which would fail the entire read and zero gpuPass.
+            int result = vkGetQueryPoolResults(device, this.gpuQueryPools[frameSlot], 0, n,
                     results, Long.BYTES, VK_QUERY_RESULT_64_BIT);
             if (result != VK_SUCCESS) {
                 return;
             }
 
-            long startTicks = results.get(0);
-            long endTicks = results.get(1);
-            if (endTicks <= startTicks) {
+            long prev = -1;
+            long total = 0;
+            long mainNanos = 0;
+            long offNanos = 0;
+            int passCount = 0;
+            int offCount = 0;
+            for (int i = 0; i < n; i++) {
+                long t = results.get(i);
+                if (prev >= 0 && t > prev) {
+                    long seg = (long) ((t - prev) * this.timestampPeriodNanos);
+                    total += seg;
+                    // The segment between t[i-1] and t[i] is the GPU work of the
+                    // pass that began at t[i-1], so its label is labels[i-1].
+                    byte lbl = gpuTimestampLabels[frameSlot][i - 1];
+                    if (lbl == GPU_TS_OFF) {
+                        offNanos += seg;
+                        offCount++;
+                    } else {
+                        mainNanos += seg;
+                    }
+                    passCount++;
+                }
+                prev = t;
+            }
+
+            if (total <= 0) {
                 return;
             }
 
-            FrameProfiler.onGpuPassNanos((long) ((endTicks - startTicks) * this.timestampPeriodNanos));
+            FrameProfiler.onGpuPassNanos(total);
+            FrameProfiler.onGpuPassBreakdown(mainNanos, offNanos, passCount, offCount);
         }
     }
 
@@ -464,8 +530,9 @@ public class Renderer {
         long __c1 = FrameProfiler.start();
         vkCmdResetQueryPool(commandBuffer, gpuQueryPools[currentFrame], 0, GPU_QUERY_COUNT);
         FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __c1);
+        gpuTimestampCount[currentFrame] = 0;
         long __c2 = FrameProfiler.start();
-        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuQueryPools[currentFrame], 0);
+        writeGpuTimestamp(commandBuffer, GPU_TS_MAIN);
         FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __c2);
 
         resetDynamicState(commandBuffer);
@@ -480,7 +547,7 @@ public class Renderer {
         // Anything still deferred has to be recorded before the pass is closed.
         if (currentCmdBuffer != null && gpuQueryPools != null) {
             long __c = FrameProfiler.start();
-            vkCmdWriteTimestamp(currentCmdBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuQueryPools[currentFrame], 1);
+            writeGpuTimestamp(currentCmdBuffer, GPU_TS_END);
             FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __c);
         }
 
@@ -624,6 +691,14 @@ public class Renderer {
 
         if (this.boundFramebuffer != framebuffer) {
             this.endRenderPass(currentCmdBuffer);
+
+            // Experiment B: mark the boundary between the pass we just closed and
+            // the pass about to begin. t0 (frame start) already captured the first
+            // main pass; this tags every subsequent switch (offscreen FBO, or a
+            // return to the main swapchain target via rebindMainTarget's sibling
+            // path that still routes through here).
+            writeGpuTimestamp(currentCmdBuffer,
+                    (framebuffer == Renderer.getInstance().getSwapChain()) ? GPU_TS_MAIN : GPU_TS_OFF);
 
             try (MemoryStack stack = stackPush()) {
                 framebuffer.beginRenderPass(currentCmdBuffer, renderPass, stack);

@@ -186,6 +186,15 @@ public final class FrameProfiler {
     /** GPU timestamp delta across the main render pass, fed by Renderer's query pool. */
     private static long gpuPassNanos;
 
+    /** Experiment B: GPU time inside the main swapchain color pass(es). */
+    private static long gpuMainNanos;
+    /** Experiment B: GPU time inside offscreen framebuffer passes. */
+    private static long gpuOffNanos;
+    /** Experiment B: total render-pass count (segments) accumulated over the window. */
+    private static int gpuPassCount;
+    /** Experiment B: offscreen render-pass count accumulated over the window. */
+    private static int gpuOffCount;
+
     /** Client game-logic tick time (Minecraft.runTick), split out of the cpu total. */
     private static long gameTickNanos;
 
@@ -2574,12 +2583,8 @@ public final class FrameProfiler {
             return;
         }
         entLoopOpen = false;
-        // TEMPORARY: per-entity replay transform report - see TextureProbe.
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.reportEntityTransforms();
         // TEMPORARY: the depth state the entity pass actually ran with - the
         // reported remaining defect is depth, and it is not visible from any
-        // other row. See TextureProbe.
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.reportEntityDepthStates();
         // TEMPORARY (d10): section-transform extremes, for the blue ribbon that
         // is water geometry drawn in the wrong place. See onSectionXf above.
         reportSectionXf();
@@ -3623,109 +3628,6 @@ public final class FrameProfiler {
             persistentDraws++;
     }
 
-    /**
-     * Arena batching (VULKANMOD_ARENA).
-     *
-     * {@code draws} counts actual vkCmdDraw* calls, so when batching works it
-     * drops sharply. These two say why: {@code iCmd} is how many chunk sections
-     * were folded into indirect commands, and {@code iBatch} how many
-     * vkCmdDrawIndexedIndirect calls replaced them. iCmd / iBatch is the average
-     * batch length, which is the number that has to be large for this to pay off.
-     */
-    private static long indirectDrawsQueued;
-    private static long indirectBatches;
-
-    /** One chunk section recorded into the open indirect batch. */
-    public static void onIndirectDrawQueued() {
-        if (ENABLED)
-            indirectDrawsQueued++;
-    }
-
-    /** One vkCmdDrawIndexedIndirect issued, covering {@code commands} sections. */
-    public static void onIndirectBatch(int commands) {
-        if (ENABLED)
-            indirectBatches++;
-    }
-
-    /**
-     * Why the open indirect batch had to be closed, one bucket per flush origin.
-     *
-     * <p>{@code iBatch} says how many batches a frame issued but not why there
-     * had to be that many, and the candidate explanations imply opposite fixes:
-     * state changes (pipeline / descriptors / dynamic state) are inherent to the
-     * scene, whereas a vertex-buffer hop is an artifact of where the arena
-     * happened to place a section. Only a flush that actually had commands in
-     * the batch is counted, so the buckets sum to {@code iBatch}.
-     *
-     * <p>Indexes are named by {@link com.yuhan123.vulkanmod.vulkan.Drawer}'s
-     * {@code FLUSH_*} constants.
-     */
-    public static final String[] BATCH_FLUSH_NAMES = {
-            "draw", "pip", "desc", "passEnd", "passBegin", "view", "scissor",
-            "vbo", "state", "idx", "cap", "eof", "other"
-    };
-
-    private static final long[] batchFlushes = new long[BATCH_FLUSH_NAMES.length];
-
-    public static void onBatchFlush(int reason) {
-        if (reason >= 0 && reason < batchFlushes.length)
-            batchFlushes[reason]++;
-    }
-
-    /**
-     * A section reached the arena path whose start is not a whole number of
-     * vertices into its slab, so it could not be expressed as a vertexOffset.
-     *
-     * Always zero in a healthy run: slots are allocated stride-aligned. A
-     * non-zero value means the arena silently stopped batching, which is a
-     * correctness fallback and would otherwise be invisible.
-     */
-    private static long arenaMisaligned;
-
-    public static void onArenaMisaligned() {
-        if (ENABLED)
-            arenaMisaligned++;
-    }
-
-    /**
-     * TEMPORARY (d13): why an arena draw did not enter the indirect batch.
-     *
-     * <p>[VKCHUNK] says ~9000 block_arena draws happen a frame but {@code iCmd}
-     * only reaches ~840, so the overwhelming majority take the direct-draw
-     * fallback. Those fallbacks call vkCmdDraw/vkCmdDrawIndexed with
-     * firstInstance = 0, while the arena vertex shader reads its chunk transform
-     * out of {@code uSection[gl_InstanceIndex]} - so a fallback draw renders
-     * every section at section 0's position. This counter names the gate that
-     * rejects them so the fix can target it.
-     *
-     * <p>Buckets: 0 no render pass / flushing, 1 not the arena pipeline,
-     * 2 capacity reached, 3 not stride-alignable.
-     */
-    public static final String[] ARENA_FALLBACK_NAMES = {"noindex", "misaligned", "nopass", "notarena", "cap"};
-
-    private static final long[] arenaFallbacks = new long[ARENA_FALLBACK_NAMES.length];
-
-    private static long arenaDraws;
-
-    /** One draw arrived on the ChunkArena path, batched or not. */
-    public static void onArenaDraw() {
-        if (ENABLED)
-            arenaDraws++;
-    }
-
-    /**
-     * Why an arena draw could not be recorded into the open indirect batch and
-     * fell back to a direct draw. Buckets: noindex = no AutoIndexBuffer for the
-     * topology, misaligned = slot start not a whole vertex into the slab,
-     * nopass = no render pass or a flush already in progress, notarena = bound
-     * pipeline is not the arena pipeline, cap = per-frame command/matrix array
-     * exhausted. The buckets plus the batched {@code iCmd} count must sum to
-     * {@code aDraw}.
-     */
-    public static void onArenaFallback(int reason) {
-        if (reason >= 0 && reason < arenaFallbacks.length)
-            arenaFallbacks[reason]++;
-    }
 
     /** A draw was issued after copying vertex data into the per-frame buffer. */
     public static void onCopiedDraw() {
@@ -3910,6 +3812,23 @@ public final class FrameProfiler {
             gpuPassNanos += nanos;
     }
 
+    /**
+     * Experiment B: accumulate one frame's per-render-pass GPU segment times.
+     * {@code mainNanos}/{@code offNanos} are the GPU durations of the main
+     * swapchain color pass(es) and the offscreen passes respectively;
+     * {@code passCount} is the total number of render-pass segments and
+     * {@code offCount} how many of those were offscreen. A large {@code offCount}
+     * with a small average per pass is the signature of fixed per-pass overhead.
+     */
+    public static void onGpuPassBreakdown(long mainNanos, long offNanos, int passCount, int offCount) {
+        if (ENABLED) {
+            gpuMainNanos += mainNanos;
+            gpuOffNanos += offNanos;
+            gpuPassCount += passCount;
+            gpuOffCount += offCount;
+        }
+    }
+
     public static void beginGameTick() {
         if (ENABLED)
             tickStart = System.nanoTime();
@@ -3935,8 +3854,16 @@ public final class FrameProfiler {
         final double gpuMs = gpuPassNanos / 1e6 / frames;
         final double tickMs = gameTickNanos / 1e6 / frames;
 
+        // Experiment B: per-render-pass GPU split. gpuPass should equal
+        // gpuMain + gpuOff; gpuPassN is the average number of render passes per
+        // frame and gpuOffN how many of those were offscreen.
+        final double gpuMainMs = gpuMainNanos / 1e6 / frames;
+        final double gpuOffMs = gpuOffNanos / 1e6 / frames;
+        final double gpuPassN = gpuPassCount / (double) frames;
+        final double gpuOffN = gpuOffCount / (double) frames;
+
         VulkanMod.LOGGER.info(
-                "[VKPROF] fps={} frame={}ms (cpu={} fence={} present={} submit={} gpuPass={}ms tick={}ms) apply={} aSkip={} draw={} draws={} binds={} descBind={} descSkip={} vbSkip={} vbB={} vbMs={} ibSkip={} descUpd={} mvp={} push={} pushSkip={} pDraw={} cDraw={} vbCopy={}MB ubo={}MB matOps={} mat={}ms dlReplay={} dlDraw={} dlMs={} dlApply={}ms camPre={} camWorld={} camPost={}ms lightmap={} pick={} pass={}ms iCmd={} iBatch={} iMis={} mvpMs={} guard={}ms",
+                "[VKPROF] fps={} frame={}ms (cpu={} fence={} present={} submit={} gpuPass={}ms tick={}ms) apply={} aSkip={} draw={} draws={} binds={} descBind={} descSkip={} vbSkip={} vbB={} vbMs={} ibSkip={} descUpd={} mvp={} push={} pushSkip={} pDraw={} cDraw={} vbCopy={}MB ubo={}MB matOps={} mat={}ms dlReplay={} dlDraw={} dlMs={} dlApply={}ms camPre={} camWorld={} camPost={}ms lightmap={} pick={} pass={}ms mvpMs={} guard={}ms gpuMain={}ms gpuOff={}ms gpuPassN={} gpuOffN={}",
                 format(1000.0 / frameMs, 1), format(frameMs, 2), format(cpuMs, 2), format(fenceMs, 2),
                 format(presentMs, 2), format(submitMs, 2), format(gpuMs, 2), format(tickMs, 2),
                 DETAILED_TIMING ? format(applyMs, 2) : "n/a", format(shaderApplyReuses / (double) frames, 0),
@@ -3961,10 +3888,9 @@ public final class FrameProfiler {
                 format(camAfterWorldNanos / 1e6 / frames, 2),
                 format(lightmapNanos / 1e6 / frames, 2), format(mouseOverNanos / 1e6 / frames, 2),
                 format(worldPassNanos / 1e6 / frames, 2),
-                format(indirectDrawsQueued / (double) frames, 0), format(indirectBatches / (double) frames, 0),
-                format(arenaMisaligned / (double) frames, 0),
                 DETAILED_TIMING ? format(mvpRecalcNanos / 1e6 / frames, 2) : "n/a",
-                DETAILED_TIMING ? format(reuseGuardNanos / 1e6 / frames, 2) : "n/a");
+                DETAILED_TIMING ? format(reuseGuardNanos / 1e6 / frames, 2) : "n/a",
+                format(gpuMainMs, 2), format(gpuOffMs, 2), format(gpuPassN, 1), format(gpuOffN, 1));
 
         // Per-vkCmd-family CPU recording cost, on its own line so the positional
         // main report above is untouched. Format: Family=count/frameMs.
@@ -3980,41 +3906,7 @@ public final class FrameProfiler {
         }
         VulkanMod.LOGGER.info("[VKPROF] cmd {}", cmdLine.length() == 0 ? "none" : cmdLine);
 
-        // Why the frame's batches had to close, on its own line for the same
-        // reason as the matrix-op kinds below: the main report's field list is
-        // parsed positionally by the A/B harnesses. The buckets sum to iBatch, so
-        // this says which named operation is capping the batch length - a slab hop
-        // and a PipelineState change imply opposite fixes and this is the only
-        // thing that tells them apart.
-        final StringBuilder brk = new StringBuilder(96);
-        for (int i = 0; i < batchFlushes.length; i++) {
-            if (batchFlushes[i] == 0)
-                continue;
-            if (brk.length() > 0)
-                brk.append(' ');
-            brk.append(BATCH_FLUSH_NAMES[i]).append('=')
-               .append(format(batchFlushes[i] / (double) frames, 1));
-        }
-        VulkanMod.LOGGER.info("[VKPROF] iBrk {}", brk.length() == 0 ? "none" : brk);
 
-        // Arena draw reconciliation: aDraw = batched (iCmd) + fallback (iFB.*).
-        // The arena vertex shader indexes its chunk transform by
-        // gl_InstanceIndex, so a direct-draw fallback has to carry the
-        // section's transform slot as firstInstance - it used to pass 0, which
-        // rendered every fallback draw at section 0's position. This line says
-        // how many draws took the fallback and which gate rejected them.
-        final StringBuilder fb = new StringBuilder(96);
-        for (int i = 0; i < arenaFallbacks.length; i++) {
-            if (arenaFallbacks[i] == 0)
-                continue;
-            if (fb.length() > 0)
-                fb.append(' ');
-            fb.append(ARENA_FALLBACK_NAMES[i]).append('=')
-              .append(format(arenaFallbacks[i] / (double) frames, 1));
-        }
-        VulkanMod.LOGGER.info("[VKPROF] iFB aDraw={} fb={}",
-                format(arenaDraws / (double) frames, 1),
-                fb.length() == 0 ? "none" : fb);
 
         // Matrix ops split by kind, on their own line so the main report's field
         // list (which the A/B harnesses parse positionally by name) is unchanged.
@@ -4650,6 +4542,10 @@ public final class FrameProfiler {
         persistentDraws = 0;
         copiedDraws = 0;
         gpuPassNanos = 0;
+        gpuMainNanos = 0;
+        gpuOffNanos = 0;
+        gpuPassCount = 0;
+        gpuOffCount = 0;
         gameTickNanos = 0;
         matrixOps = 0;
         matrixNanos = 0;
@@ -4663,14 +4559,8 @@ public final class FrameProfiler {
         lightmapNanos = 0;
         mouseOverNanos = 0;
         worldPassNanos = 0;
-        indirectDrawsQueued = 0;
-        indirectBatches = 0;
-        arenaMisaligned = 0;
-        java.util.Arrays.fill(batchFlushes, 0);
-        java.util.Arrays.fill(arenaFallbacks, 0);
         java.util.Arrays.fill(cmdNanos, 0);
         java.util.Arrays.fill(cmdCount, 0);
-        arenaDraws = 0;
         mvpRecalcNanos = 0;
         reuseGuardNanos = 0;
         for (int i = 0; i < matByKind.length; i++)

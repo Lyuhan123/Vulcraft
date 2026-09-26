@@ -69,10 +69,7 @@ public class RenderManagerMixin {
         }
         final long t0 = System.nanoTime();
         // TEMPORARY: name the entity whose display-list replays follow, and where
-        // the base modelview says it belongs. See TextureProbe.beginEntity.
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.beginEntity(entity, x, y, z);
         render.doRender(entity, x, y, z, yaw, partialTicks);
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onEntityEnd();
         FrameProfiler.onEntityDo(System.nanoTime() - t0);
     }
 

@@ -4,6 +4,7 @@ import com.yuhan123.vulkanmod.vulkan.device.DeviceManager;
 import com.yuhan123.vulkanmod.vulkan.memory.MemoryType;
 
 import static com.yuhan123.vulkanmod.vulkan.util.VUtil.align;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 
 public class UniformBuffer extends Buffer {
@@ -22,7 +23,11 @@ public class UniformBuffer extends Buffer {
     }
 
     public UniformBuffer(int size, MemoryType memoryType) {
-        super(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, memoryType);
+        // STORAGE_BUFFER_BIT lets the chunk draw path bind this same buffer as a
+        // read-only SectionData SSBO (gl_InstanceIndex-indexed per-section
+        // offsets) instead of a UBO; the bit is a harmless superset for the
+        // normal UBO consumers.
+        super(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, memoryType);
         this.createBuffer(size);
     }
 

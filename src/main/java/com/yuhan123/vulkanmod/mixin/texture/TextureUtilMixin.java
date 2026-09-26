@@ -53,7 +53,6 @@ public class TextureUtilMixin {
         // just allocated here. A 64x32 entity skin that reaches glTexImage2D but
         // never reaches uploadTextureImageSub is allocated-and-empty, which is
         // the "mob renders black" fingerprint. Trace the handoff.
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onAllocateImpl(glTextureId, width, height);
     }
 
     /**
@@ -64,13 +63,11 @@ public class TextureUtilMixin {
     @Inject(method = "uploadTextureImageSub", at = @At("HEAD"))
     private static void vulkanmod$onUploadSubHead(int textureId, java.awt.image.BufferedImage image, int x, int y,
                                                   boolean blur, boolean clamp, org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Integer> cir) {
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onUploadImageSub(textureId, "HEAD");
     }
 
     @Inject(method = "uploadTextureImageSub", at = @At("RETURN"))
     private static void vulkanmod$onUploadSubReturn(int textureId, java.awt.image.BufferedImage image, int x, int y,
                                                     boolean blur, boolean clamp, org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Integer> cir) {
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onUploadImageSub(textureId, "RETURN");
     }
 
 }

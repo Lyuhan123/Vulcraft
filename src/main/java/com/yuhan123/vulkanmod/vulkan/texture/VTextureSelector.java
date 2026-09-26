@@ -131,17 +131,10 @@ public abstract class VTextureSelector {
                 image = state.imageIdx == 2 ? getWhiteTexture() : resolveMissingImage();
             }
 
-            // TEMPORARY: lightmap-slot probe - see TextureProbe.
-            if (state.imageIdx == 2) {
-                TextureProbe.onLightmapBind(image, image == getWhiteTexture());
-            }
-
             if (image != null) {
                 VTextureSelector.bindTexture(state.imageIdx, image);
             }
         }
-
-        TextureProbe.onPipelineBind(pipeline, imageDescriptors);
     }
 
     public static VulkanImage getImage(int i) {

@@ -193,7 +193,6 @@ public class ShaderInstance {
         return pipeline;
     }
 
-    /** TEMPORARY: diagnostics only - see TextureProbe. */
     public String getName() {
         return this.name;
     }

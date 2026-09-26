@@ -500,9 +500,6 @@ public abstract class Pipeline {
             final boolean descriptorChanged = needsUpdate(uniformBuffer);
             final boolean uniformsChanged = updateUniforms(uniformBuffer);
 
-            // TEMPORARY: descriptor-skip probe - see TextureProbe.
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onDescriptorDecision(
-                    pipeline, descriptorChanged, uniformsChanged);
 
             // Nothing about this bind would differ from the one already issued in
             // this command buffer: same set, same dynamic offsets, byte-identical
@@ -595,8 +592,6 @@ public abstract class Pipeline {
                             MemoryUtil.memAddress0(this.uboLastWritten[i]), structSize);
 
                     // TEMPORARY: dump the first float4 the shader will read as
-                    // ColorModulator - see TextureProbe.
-                    com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onUboStaged(pipeline, i, staged, structSize);
 
                     this.dynamicOffsets.put(i, offset);
                     ub.updateOffset(alignedSize);

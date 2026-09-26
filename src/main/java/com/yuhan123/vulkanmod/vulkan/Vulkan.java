@@ -46,7 +46,7 @@ public class Vulkan {
      * FPS cost (draw recording alone was ~17ms of the frame). Off by default;
      * re-enable with -Dvulkanmod.validationLayers=true.
      */
-    public static final boolean ENABLE_VALIDATION_LAYERS = Boolean.getBoolean("vulkanmod.validationLayers");
+    public static final boolean ENABLE_VALIDATION_LAYERS = false;
 
     //    public static final boolean DYNAMIC_RENDERING = true;
     public static final boolean DYNAMIC_RENDERING = false;

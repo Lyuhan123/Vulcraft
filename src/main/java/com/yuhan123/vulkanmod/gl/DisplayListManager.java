@@ -126,9 +126,6 @@ public class DisplayListManager {
             internalId = nextInternalId++;
         }
         // TEMPORARY: report when one GL id is re-mapped to a second internal list,
-        // which would make two different models share geometry. See TextureProbe.
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onStartList(
-                glId, internalId, null);
         DisplayList prev = displayLists.put(internalId, new DisplayList());
         if (prev != null) {
             prev.free();
@@ -150,26 +147,6 @@ public class DisplayListManager {
                 list.upload(recordingData.buffer(), recordingData.length());
             }
 
-            // TEMPORARY: report the merged draw shape - see TextureProbe.
-            if (com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.ENABLED) {
-                StringBuilder sb = new StringBuilder();
-                java.util.Set<String> seen = new java.util.HashSet<>();
-                for (CapturedDraw d : list.draws) {
-                    sb.append(d.vertexCount).append('/').append(d.mode).append('@')
-                      .append(String.format("%.1f,%.1f,%.1f",
-                              d.relative.m30(), d.relative.m31(), d.relative.m32()));
-                    if (!seen.add(d.relative.toString())) {
-                        sb.append("~dup");
-                    }
-                    sb.append(' ');
-                    if (sb.length() > 400) {
-                        sb.append("...");
-                        break;
-                    }
-                }
-                com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onListBuilt(
-                        recordingInternal, list.draws.size(), sb.toString());
-            }
         }
 
         recording = false;
@@ -195,15 +172,6 @@ public class DisplayListManager {
         if (list != null) {
             FrameProfiler.onDisplayListReplay();
 
-            // TEMPORARY: list shape probe - see TextureProbe.
-            if (com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.ENABLED) {
-                java.util.Set<String> rel = new java.util.HashSet<>();
-                for (CapturedDraw d : list.draws) {
-                    rel.add(d.relative.toString());
-                }
-                com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onListReplay(
-                        internalId, list.draws.size(), rel.size());
-            }
 
             // Pass 28: the replay time that belongs to the entity loop.
             //
@@ -230,12 +198,6 @@ public class DisplayListManager {
             SCRATCH_MV.set(VRenderSystem.pullModelViewFloatBuffer());
             SCRATCH_PROJ.set(VRenderSystem.projectionFloatBuffer());
             SCRATCH_PV.set(SCRATCH_PROJ).mul(SCRATCH_MV);
-            // TEMPORARY: per-entity replay transform - see TextureProbe.
-            if (com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.ENABLED && entDl) {
-                com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onEntityReplay(
-                        internalId, list.draws.size(),
-                        SCRATCH_MV.m30(), SCRATCH_MV.m31(), SCRATCH_MV.m32());
-            }
             // TEMPORARY: VULKANMOD_NOENTDRAW=1 suppresses entity display-list
             // draws. Rendering one fixed scene with and without them and diffing
             // isolates exactly which pixels entities contribute - which answers
@@ -279,8 +241,6 @@ public class DisplayListManager {
         for (int i = 0; i < Math.max(1, count); ++i) {
             glToInternal.put(id + i, id + i);
         }
-        // TEMPORARY: report the id handed to vanilla. See TextureProbe.
-        com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onGenLists(count, id, nextInternalId);
         return id;
     }
 
@@ -340,16 +300,8 @@ public class DisplayListManager {
         SCRATCH_MVP.get(VRenderSystem.mvpFloatBuffer());
         VRenderSystem.markMvpClean();
 
-        // TEMPORARY: entity-pass draw probe - see TextureProbe.
         if (FrameProfiler.entLoopOpen()) {
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onEntityDraw(
-                    shader == null ? "?" : shader.getName(),
-                    com.yuhan123.vulkanmod.gl.VkGlTexture.getBoundTextureId(),
-                    draw.vertexCount, draw.mode, SCRATCH_MVP);
             // Paired with the row above: position correctness says nothing about
-            // depth, and depth is the reported defect. See TextureProbe.
-            com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onEntityDepthState(
-                    shader == null ? "?" : shader.getName());
         }
 
         try {
@@ -452,8 +404,6 @@ public class DisplayListManager {
                 // TEMPORARY: a QUADS draw whose vertex count is not a multiple of
                 // 4 makes genQuadIndices() read past the last whole quad and
                 // expand the next part's vertices into this draw - scrambled
-                // geometry. Report it. See TextureProbe.
-                com.yuhan123.vulkanmod.vulkan.texture.TextureProbe.onQuadRun(first.vertexCount);
 
                 this.draws.set(write++, first);
                 read = next;

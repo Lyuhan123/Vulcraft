@@ -151,6 +151,13 @@ public class Drawer {
        drawIndexed(vertexBuffer, indexBuffer, indexCount, indexBuffer.indexType.value);
     }
 
+    // TEMP DIAG (pass 53): every indexed draw in the frame funnels through the
+    // 5-arg overload below, so a bounded dump there names the path the ~700
+    // chunk draws actually take - glDrawArrays (22/frame) is not it.
+    private static int drawIdxDumps;
+    private static int drawIdxTotal;
+    private static final long[] IDX_BUCKETS = new long[6];
+
     public void drawIndexed(Buffer vertexBuffer, Buffer indexBuffer, int indexCount, int indexType) {
         drawIndexed(vertexBuffer, vertexBuffer.getOffset(), indexBuffer, indexCount, indexType);
     }
@@ -274,10 +281,11 @@ public class Drawer {
 
         Renderer.getInstance().flushPipelineBind();
         bindVertexBuffer(commandBuffer, vertexBuffer, 0L);
+        int firstVertex = (int) (byteOffset / vertexStride);
         bindIndexBuffer(commandBuffer, indexBuffer, indexType);
 
         long __c = FrameProfiler.start();
-        vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, (int) (byteOffset / vertexStride), firstInstance);
+        vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, firstVertex, firstInstance);
         FrameProfiler.addCmd(FrameProfiler.CMD_DRAW_INDEXED, __c);
         FrameProfiler.onDraw();
         FrameProfiler.addDrawRecord(__t);

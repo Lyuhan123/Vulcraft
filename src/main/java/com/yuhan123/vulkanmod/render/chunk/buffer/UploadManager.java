@@ -1,6 +1,5 @@
 package com.yuhan123.vulkanmod.render.chunk.buffer;
 
-import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import com.yuhan123.vulkanmod.vulkan.Synchronization;
 import com.yuhan123.vulkanmod.vulkan.Vulkan;
@@ -57,14 +56,12 @@ public class UploadManager {
                 barrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
                 barrier.dstAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
 
-                long __c = FrameProfiler.start();
                 vkCmdPipelineBarrier(commandBuffer,
                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                         0,
                         barrier,
                         null,
                         null);
-                FrameProfiler.addCmd(FrameProfiler.CMD_PIPELINE_BARRIER, __c);
             }
 
             this.dstBuffers.clear();
@@ -94,14 +91,12 @@ public class UploadManager {
             bufferMemoryBarrier.dstAccessMask(VK_ACCESS_TRANSFER_READ_BIT);
             bufferMemoryBarrier.size(VK_WHOLE_SIZE);
 
-            long __c = FrameProfiler.start();
             vkCmdPipelineBarrier(commandBuffer,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                     0,
                     barrier,
                     bufferMemoryBarriers,
                     null);
-            FrameProfiler.addCmd(FrameProfiler.CMD_PIPELINE_BARRIER, __c);
         }
 
         this.dstBuffers.add(dst.getId());

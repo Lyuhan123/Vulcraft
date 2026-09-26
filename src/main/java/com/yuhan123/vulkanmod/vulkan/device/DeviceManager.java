@@ -170,7 +170,15 @@ public abstract class DeviceManager {
 
             VkPhysicalDeviceVulkan11Features deviceVulkan11Features = VkPhysicalDeviceVulkan11Features.calloc(stack);
             deviceVulkan11Features.sType$Default();
-            deviceVulkan11Features.shaderDrawParameters(device.isDrawIndirectSupported());
+            // Enable shaderDrawParameters whenever the device supports it. The
+            // batched chunk path feeds the per-section offset through the draw's
+            // baseInstance and reads it back as gl_InstanceIndex in the vertex
+            // shader; without this feature gl_InstanceIndex stays 0 and every
+            // section collapses to offset 0. It is independent of multiDrawIndirect
+            // (which only gates the opt-in indirect merge), so do not tie the two
+            // together - a device can support shaderDrawParameters yet lack
+            // multiDrawIndirect, and the direct batched path must still work.
+            deviceVulkan11Features.shaderDrawParameters(device.availableFeatures11.shaderDrawParameters());
 
             VkPhysicalDeviceVulkan12Features deviceVulkan12Features = VkPhysicalDeviceVulkan12Features.calloc(stack);
             deviceVulkan12Features.sType$Default();
