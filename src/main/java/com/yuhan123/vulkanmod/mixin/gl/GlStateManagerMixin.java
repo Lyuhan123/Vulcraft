@@ -543,8 +543,35 @@ public class GlStateManagerMixin {
       return p_187418_0_;
    }
 
+   /**
+    * 1.12.2's fixed-function current colour doubles as the shader-side
+    * ColorModulator. The mob hurt flash (RenderLivingBase.setBrightness ->
+    * GlStateManager.color(1, 1 - t, 1 - t)) and every GUI/overlay tint flow
+    * through here. The vanilla body only forwarded to glColor4f on a GL context
+    * that does not exist under Vulkan, so the tint was silently dropped and
+    * entities never flashed red. Routing it into the state setShaderColor writes
+    * makes it reach every shader that declares ColorModulator through the same
+    * UBO supplier path fog uses.
+    */
+   @Overwrite
+   public static void color(float colorRed, float colorGreen, float colorBlue, float colorAlpha) {
+      VRenderSystem.setShaderColor(colorRed, colorGreen, colorBlue, colorAlpha);
+   }
+
+   @Overwrite
+   public static void color(float colorRed, float colorGreen, float colorBlue) {
+      VRenderSystem.setShaderColor(colorRed, colorGreen, colorBlue, 1.0f);
+   }
+
+   /**
+    * Vanilla resets the colour state to white (marking it dirty so the next
+    * glColor4f re-applies). RenderLivingBase.unsetBrightness calls this after the
+    * hurt flash; leaving it a no-op would leak the red tint into every later
+    * draw, so restore (1,1,1,1) unconditionally.
+    */
    @Overwrite
    public static void resetColor() {
+      VRenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
    }
 
    private static void resetPointerState() {
@@ -1004,12 +1031,47 @@ public class GlStateManagerMixin {
    public static void disableTexture2D() {
    }
 
+   /**
+    * Arms the mob hurt/burn flash: RenderLivingBase.setBrightness uploads the
+    * combine's constant colour via
+    * {@code glTexEnv(GL_TEXTURE_ENV=8960, GL_TEXTURE_ENV_COLOR=8705, buffer)}.
+    * The buffer holds (r,g,b,a) with a = the flash mix factor (0.3 for the hurt
+    * red). Zero alpha elsewhere in VRenderSystem means "no flash", so only this
+    * pname touches the flash state.
+    */
    @Overwrite
    public static void glTexEnv(int p_187448_0_, int p_187448_1_, FloatBuffer p_187448_2_) {
+      if (p_187448_1_ == 8705 && p_187448_2_ != null && p_187448_2_.remaining() >= 4) {
+         int pos = p_187448_2_.position();
+         VRenderSystem.setFlashColor(p_187448_2_.get(pos), p_187448_2_.get(pos + 1),
+               p_187448_2_.get(pos + 2), p_187448_2_.get(pos + 3));
+      }
    }
 
+   /**
+    * Disarms the flash: RenderLivingBase.unsetBrightness restores the texture
+    * env mode to GL_MODULATE (8448) on both texture units. setBrightness itself
+    * only ever sets GL_TEXTURE_ENV_MODE to GL_COMBINE while flashing, so the
+    * MODULATE test cannot clear a flash that is still being set up.
+    */
+   /**
+    * Disarms the flash. RenderLivingBase.unsetBrightness restores the combine on
+    * unit0 with {@code glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_MODULATE)}
+    * - the arm sequence never writes COMBINE_ALPHA there (it sets REPLACE), so
+    * this pair is the fingerprint of "combine restored, flash over".
+    *
+    * <p>NOTE: TEXTURE_ENV_MODE itself is NEVER restored to GL_MODULATE - both
+    * setBrightness and unsetBrightness keep the mode at GL_COMBINE and only
+    * reprogram the combine operands - so testing (TEXTURE_ENV_MODE, MODULATE)
+    * here would never fire and the flash would stick to every entity for the
+    * rest of the frame forever.
+    */
    @Overwrite
    public static void glTexEnvi(int p_187399_0_, int p_187399_1_, int p_187399_2_) {
+      if ((p_187399_1_ == 34162 /* GL_COMBINE_ALPHA */ && p_187399_2_ == 8448 /* GL_MODULATE */)
+            || (p_187399_1_ == 8704 /* GL_TEXTURE_ENV_MODE */ && p_187399_2_ == 8448)) {
+         VRenderSystem.setFlashColor(0.0f, 0.0f, 0.0f, 0.0f);
+      }
    }
 
    @Overwrite

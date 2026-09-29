@@ -66,6 +66,28 @@ public abstract class VRenderSystem {
     private static boolean mvpDirty = true;
 
     public static MappedBuffer modelOffset = new MappedBuffer(3 * 4);
+    /**
+     * The WORLD-SPACE model translation the current terrain draw applies,
+     * published per section (vanilla path) or per layer (batched path) and fed
+     * to block.vsh as a push constant alongside the MVP.
+     *
+     * <p>The shader ADDS it to the vertex position before measuring the fog
+     * distance, so the value must be whatever turns the stored position into
+     * (world - eye):
+     * <ul>
+     *   <li>vanilla per-section: vertices are chunk-local and the CPU
+     *       translates by {@code pos - viewEntity} -> publish that;</li>
+     *   <li>batched: the section origin is baked into the vertices and the CPU
+     *       translates by {@code -viewEntity} -> publish that.</li>
+     * </ul>
+     * Leaving it at zero makes the vertex stage measure {@code length(Position)}
+     * from the world ORIGIN, which is what made the distance fog disappear (a
+     * 72-high eye against a 144-block fog start put nearly every terrain vertex
+     * below the fog start). Zero is also the correct value for every
+     * non-terrain draw that shares block.vsh, so the terrain paths reset it
+     * when they finish.
+     */
+    public static MappedBuffer chunkOffset = new MappedBuffer(4 * 4);
     public static MappedBuffer lightDirection0 = new MappedBuffer(3 * 4);
     public static MappedBuffer lightDirection1 = new MappedBuffer(3 * 4);
 
@@ -203,6 +225,71 @@ public abstract class VRenderSystem {
         lightmapCoord.putFloat(4, v);
         lightmapCoord.putFloat(8, 0.0f);
         lightmapCoord.putFloat(12, 1.0f);
+    }
+
+    /** TEMP DIAGNOSTIC: records setLightmapTextureCoords calls issued after GUI item rendering begins. */
+    private static int guiSetLmLogs;
+
+    public static void logGuiSetLm(float u, float v) {
+        if (guiSetLmLogs < 16) {
+            ++guiSetLmLogs;
+            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(String.format(
+                    "[VKPROF] SETLM (%.1f,%.1f)", u, v));
+        }
+    }
+
+    /**
+     * Entity hurt/burn flash colour, published to the entity shaders as the
+     * {@code EntityFlash} UBO field.
+     *
+     * <p>1.12.2 draws the mob hurt flash through the fixed-function texture
+     * combiner, not the current colour: RenderLivingBase.setBrightness uploads
+     * {@code glTexEnv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, (1,0,0,0.3))} and the
+     * lightmap unit's GL_INTERPOLATE combine mixes that constant into the shaded
+     * texture by the constant's alpha. The vanilla GlStateManager body only
+     * reached glColor/glTexEnv on a GL context that does not exist under Vulkan,
+     * so the state was silently dropped and mobs never flashed.
+     *
+     * <p>Written by the glTexEnv / glTexEnvi hooks in GlStateManagerMixin: the
+     * flash is armed by GL_TEXTURE_ENV_COLOR and cleared when the texture env
+     * mode is restored to GL_MODULATE (RenderLivingBase.unsetBrightness). Zero
+     * alpha means "no flash", so a fresh MappedBuffer (all zero) is inert.
+     */
+    public static final MappedBuffer flashColor = new MappedBuffer(4 * 4);
+
+    /** TEMP DIAGNOSTIC: bounded log of flash arm/clear transitions (see setFlashColor). */
+    private static int flashLogs;
+
+    /** TEMP DIAGNOSTIC: when true, setLightmapTextureCoords calls are logged (see OpenGlHelperMixin). */
+    public static boolean guiLmWatch;
+
+    public static void setFlashColor(float r, float g, float b, float a) {
+        final float oldA = flashColor.getFloat(12);
+        if (flashColor.getFloat(0) != r || flashColor.getFloat(4) != g
+                || flashColor.getFloat(8) != b || flashColor.getFloat(12) != a) {
+            ++uniformVersion;
+        }
+        flashColor.putFloat(0, r);
+        flashColor.putFloat(4, g);
+        flashColor.putFloat(8, b);
+        flashColor.putFloat(12, a);
+
+        // TEMP DIAGNOSTIC: every arm and every clear-of-an-armed flash, with the
+        // caller. Expected healthy sequence per flashing mob: ARM (glTexEnv from
+        // RenderLivingBase.setBrightness) ... CLEAR (unsetBrightness) - and
+        // nothing in between on other entities. A missing CLEAR, or an ARM whose
+        // caller is not setBrightness, is the persistent-red bug.
+        if (flashLogs < 24 && (a > 0.0f || oldA > 0.0f)) {
+            ++flashLogs;
+            final StackTraceElement[] st = Thread.currentThread().getStackTrace();
+            final StringBuilder s = new StringBuilder(String.format(
+                    "[VKPROF] FLASH %s rgb=(%.2f,%.2f,%.2f) a=%.2f", a > 0.0f ? "ARM  " : "CLEAR", r, g, b, a));
+            for (int i = 2; i < Math.min(7, st.length); i++) {
+                s.append(" <- ").append(st[i].getClassName(), st[i].getClassName().lastIndexOf('.') + 1,
+                        st[i].getClassName().length()).append('.').append(st[i].getMethodName());
+            }
+            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(s.toString());
+        }
     }
 
     public static void setWindow(long window) {
@@ -463,6 +550,20 @@ public abstract class VRenderSystem {
         VUtil.UNSAFE.putFloat(ptr, x);
         VUtil.UNSAFE.putFloat(ptr + 4, y);
         VUtil.UNSAFE.putFloat(ptr + 8, z);
+    }
+
+    /**
+     * Publishes the world-space model translation for the next terrain draw.
+     * See {@link #chunkOffset}: this is the vector block.vsh ADDS to Position,
+     * i.e. {@code pos - eye} on the vanilla path and {@code -eye} on the batched
+     * one, and 0 for anything that is not terrain.
+     */
+    public static void setChunkOffset(float x, float y, float z) {
+        long ptr = chunkOffset.ptr;
+        VUtil.UNSAFE.putFloat(ptr, x);
+        VUtil.UNSAFE.putFloat(ptr + 4, y);
+        VUtil.UNSAFE.putFloat(ptr + 8, z);
+        VUtil.UNSAFE.putFloat(ptr + 12, 0.0f);
     }
 
     public static void setShaderColor(float f1, float f2, float f3, float f4) {

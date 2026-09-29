@@ -14,7 +14,15 @@
     "texture.TextureUtilMixin",
     "texture.TextureManagerMixin",
     "vertex.BufferBuilderMixin",
-    "vertex.TessellatorMixin"
+    "vertex.TessellatorMixin",
+    "entity.RenderLivingBaseMixin",
+    "gui.RenderItemMixin",
+    "chunk.ChunkRenderContainerMixin",
+    "chunk.VboRenderListMixin",
+    "probe.EntityRendererProbesMixin",
+    "probe.RenderGlobalProbesMixin",
+    "probe.RenderManagerProbesMixin",
+    "probe.RenderGlobalEntityWalkMixin"
   ],
   "mixins": [
     "forge.ForgeHooksClientMixin",

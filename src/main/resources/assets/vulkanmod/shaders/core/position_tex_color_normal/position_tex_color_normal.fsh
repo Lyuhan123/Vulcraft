@@ -7,6 +7,10 @@ layout(binding = 3) uniform sampler2D Sampler2;
 layout(binding = 1) uniform UBO{
     vec4 ColorModulator;
     vec4 LightmapCoord;
+    vec4 FogColor;
+    float FogStart;
+    float FogEnd;
+    vec4 EntityFlash;
 };
 
 layout(location = 0) in vec4 vertexColor;
@@ -22,6 +26,9 @@ void main() {
     // test below is unchanged. Without this the mob is drawn with no lightmap and
     // comes out unlit (full-bright).
     color.rgb *= texture(Sampler2, (LightmapCoord.xy + 8.0) / 256.0).rgb;
+    // 1.12.2 mob hurt/burn flash, same GL_INTERPOLATE constant-colour mechanism
+    // as the sibling position_tex_normal shader. Alpha 0 = no flash.
+    color.rgb = mix(color.rgb, EntityFlash.rgb, EntityFlash.a);
     // Alpha test: this is the entity/mob cutout shader. Vanilla 1.12.2 draws
     // mobs with GL_ALPHA_TEST on and discards anything below the 0.1 threshold
     // (RenderLivingBase leaves the default 0.1 func in place), which is what

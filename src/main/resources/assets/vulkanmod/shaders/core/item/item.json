@@ -14,6 +14,9 @@
   "samplers": [
     {
       "name": "Sampler0"
+    },
+    {
+      "name": "Sampler2"
     }
   ],
   "uniforms": [
@@ -53,6 +56,17 @@
         0.0,
         0.0,
         0.0
+      ]
+    },
+    {
+      "name": "LightmapCoord",
+      "type": "float",
+      "count": 4,
+      "values": [
+        240.0,
+        240.0,
+        0.0,
+        1.0
       ]
     }
   ],
@@ -121,6 +135,17 @@
           "type": "float",
           "count": 1,
           "values": [
+            1.0
+          ]
+        },
+        {
+          "name": "LightmapCoord",
+          "type": "float",
+          "count": 4,
+          "values": [
+            240.0,
+            240.0,
+            0.0,
             1.0
           ]
         }

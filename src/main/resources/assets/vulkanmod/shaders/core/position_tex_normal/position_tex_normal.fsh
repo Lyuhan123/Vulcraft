@@ -10,6 +10,7 @@ layout(binding = 1) uniform UBO{
     vec4 FogColor;
     float FogStart;
     float FogEnd;
+    vec4 EntityFlash;
 };
 
 layout(location = 0) in vec2 texCoord0;
@@ -25,6 +26,11 @@ void main() {
     // alpha test below is unchanged. Without this the entity is drawn with no
     // lightmap at all and comes out full-bright.
     color.rgb *= texture(Sampler2, (LightmapCoord.xy + 8.0) / 256.0).rgb;
+    // 1.12.2 mob hurt/burn flash: RenderLivingBase.setBrightness uploads the
+    // combine constant (1,0,0,0.3) through GL_TEXTURE_ENV_COLOR and the lightmap
+    // unit's GL_INTERPOLATE combine mixes it into the shaded texel by that
+    // alpha. Reproduce exactly that mix here; alpha 0 leaves the texel alone.
+    color.rgb = mix(color.rgb, EntityFlash.rgb, EntityFlash.a);
     if (color.a < 0.1) {
         discard;
     }

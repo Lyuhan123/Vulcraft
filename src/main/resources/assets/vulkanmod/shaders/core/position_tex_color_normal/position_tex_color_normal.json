@@ -68,6 +68,17 @@
         0.0,
         0.0
       ]
+    },
+    {
+      "name": "EntityFlash",
+      "type": "float",
+      "count": 4,
+      "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
     }
   ],
   "PushConstants": [
@@ -100,30 +111,30 @@
       "type": "fragment",
       "binding": 1,
       "fields": [
-    {
-      "name": "ColorModulator",
-      "type": "float",
-      "count": 4,
-      "values": [
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "name": "LightmapCoord",
-      "type": "float",
-      "count": 4,
-      "values": [
-        240.0,
-        240.0,
-        0.0,
-        1.0
-      ]
-    },
-    {
-      "name": "FogColor",
+        {
+          "name": "ColorModulator",
+          "type": "float",
+          "count": 4,
+          "values": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "LightmapCoord",
+          "type": "float",
+          "count": 4,
+          "values": [
+            240.0,
+            240.0,
+            0.0,
+            1.0
+          ]
+        },
+        {
+          "name": "FogColor",
           "type": "float",
           "count": 4,
           "values": [
@@ -147,6 +158,17 @@
           "count": 1,
           "values": [
             1.0
+          ]
+        },
+        {
+          "name": "EntityFlash",
+          "type": "float",
+          "count": 4,
+          "values": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
           ]
         }
       ]

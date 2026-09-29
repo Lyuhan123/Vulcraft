@@ -119,7 +119,7 @@ unimined.minecraft {
             // is not guaranteed to inherit the environment of whichever shell
             // started the build - which would silently turn an A/B into two runs
             // of the same configuration. Forward them explicitly.
-            ['MIP', 'ALPHADILATE', 'DLMERGE', 'DRAWTIMING', 'PROFILE_DUMP',
+            ['MIP', 'ALPHADILATE', 'DLMERGE', 'DRAWTIMING', 'PROFILE_DUMP', 'GPUDRAWTIMING',
              'AUTOJOIN', 'AUTOQUIT', 'BENCH_SECONDS', 'SHOT', 'SHOT_TAG',
              'FRESH_WORLD', 'APPLYREUSE', 'REUSEALL',
              'FREEZE', 'PIPESTATE', 'PIPESTATE_VERIFY', 'MEMOAB', 'AB',
@@ -138,7 +138,7 @@ unimined.minecraft {
              'TILEIDX', 'TILEIDX_VERIFY',
              'BENCH_POS', 'BENCH_YAW', 'BENCH_PITCH', 'BENCH_CHEST', 'NOCULL', 'DEPTHBIAS',
              'NOMIP', 'EARLYCUTOUT', 'THIRDPERSON', 'NOENTDRAW', 'DLPULL', 'XFPROBE',
-             'SKIPLAYER', 'ARENA'].each { name ->
+             'SKIPLAYER', 'ARENA', 'TERRAIN_BATCH', 'TB_NODRAW', 'INDIRECT', 'CLOUDDIAG'].each { name ->
                 def key = "VULKANMOD_${name}"
                 def value = System.getenv(key)
                 if (value != null) {
@@ -318,6 +318,21 @@ test {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
+
+// Dev-run fix: Cleanroom loads build/classes/java/main as the mod via its own
+// mod classloader. That classloader does NOT include build/resources/main, so
+// mcmod.info and *.mixin.json are invisible to it ("Found 0 discovered mod
+// ids" + mixin config "could not be read"). Copy the resources into the classes
+// dir so the mod classloader can see them. This only affects dev runs; the real
+// mod jar is built separately (DuplicatesStrategy.EXCLUDE covers any overlap).
+def buildDirFile = layout.buildDirectory.get().asFile
+def copyResourcesToClasses = tasks.register('copyResourcesToClasses', Copy) {
+    from "$buildDirFile/resources/main"
+    into "$buildDirFile/classes/java/main"
+    dependsOn processResources
+}
+tasks.named('runClient') { dependsOn copyResourcesToClasses }
+tasks.named('runServer') { dependsOn copyResourcesToClasses }
 
 apply from: 'gradle/scripts/publishing.gradle'
 apply from: 'gradle/scripts/extra.gradle'

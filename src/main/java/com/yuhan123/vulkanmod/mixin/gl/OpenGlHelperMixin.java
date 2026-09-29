@@ -190,6 +190,12 @@ public class OpenGlHelperMixin {
         // entity shaders sample the lightmap themselves - without it entities are
         // drawn with no lightmap at all and come out full-bright.
         com.yuhan123.vulkanmod.vulkan.VRenderSystem.setLightmapCoord(p_77475_1_, p_77475_2_);
+        // TEMP DIAGNOSTIC: once GUI item rendering has started (guiLmWatch), record
+        // any lightmap coordinate that gets published, so we can see whether the
+        // (240,240) reset set at renderItemIntoGUI HEAD is overwritten mid-method.
+        if (com.yuhan123.vulkanmod.vulkan.VRenderSystem.guiLmWatch) {
+            com.yuhan123.vulkanmod.vulkan.VRenderSystem.logGuiSetLm(p_77475_1_, p_77475_2_);
+        }
     }
 
     /**

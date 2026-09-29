@@ -279,6 +279,7 @@ public class DisplayListManager {
             return;
 
         FrameProfiler.onDisplayListDraw();
+        FrameProfiler.setEntityReplay(true);
         FrameProfiler.logDrawState("entity");
 
         Matrix4f relative = draw.relative;
@@ -318,6 +319,7 @@ public class DisplayListManager {
                 Renderer.getDrawer().draw(draw.fallback, draw.mode, draw.vertexFormat, draw.vertexCount);
             }
         } finally {
+            FrameProfiler.setEntityReplay(false);
             VRenderSystem.markMvpDirty();
         }
     }

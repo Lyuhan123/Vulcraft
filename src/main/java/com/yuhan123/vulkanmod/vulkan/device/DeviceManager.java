@@ -31,6 +31,15 @@ public abstract class DeviceManager {
     public static VkPhysicalDevice physicalDevice;
     public static VkDevice vkDevice;
 
+    /**
+     * Whether {@code VK_EXT_multi_draw} was offered by the picked physical device
+     * AND successfully enabled at logical-device creation. The indirect/multi-draw
+     * terrain POC (VULKANMOD_INDIRECT=2) reads this to decide whether it can emit
+     * vkCmdDrawMultiIndexedEXT or must fall back to per-section draws. Never
+     * required: a GPU without the extension simply skips the POC path.
+     */
+    public static boolean MULTI_DRAW_AVAILABLE = false;
+
     public static Device device;
 
     public static VkPhysicalDeviceProperties deviceProperties;
@@ -222,7 +231,26 @@ public abstract class DeviceManager {
 //                deviceVulkan13Features.pNext(deviceVulkan11Features.address());
             }
 
-            createInfo.ppEnabledExtensionNames(asPointerBuffer(Vulkan.REQUIRED_EXTENSION));
+            // VK_EXT_multi_draw is optional: enable it only when the picked GPU
+            // actually offers it, so a device lacking the extension still creates
+            // successfully (the POC path falls back to per-section draws).
+            final java.util.Set<String> enabledExt = new java.util.HashSet<>(Vulkan.REQUIRED_EXTENSION);
+            try (MemoryStack st = stackPush()) {
+                final VkExtensionProperties.Buffer avail = getAvailableExtension(st, physicalDevice);
+                boolean hasMultiDraw = false;
+                for (int ei = 0; ei < avail.capacity(); ei++) {
+                    if ("VK_EXT_multi_draw".equals(avail.get(ei).extensionNameString())) {
+                        hasMultiDraw = true;
+                        break;
+                    }
+                }
+                if (hasMultiDraw) {
+                    enabledExt.add("VK_EXT_multi_draw");
+                    MULTI_DRAW_AVAILABLE = true;
+                }
+                avail.free();
+            }
+            createInfo.ppEnabledExtensionNames(asPointerBuffer(enabledExt));
 
 //            Configuration.DEBUG_FUNCTIONS.set(true);
 

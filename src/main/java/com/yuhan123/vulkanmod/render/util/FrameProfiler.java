@@ -10,6 +10,9 @@ import java.util.List;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.renderer.chunk.CompiledChunk;
 import net.minecraft.client.renderer.chunk.RenderChunk;
+import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
+import net.minecraft.client.renderer.vertex.VertexFormat;
+import net.minecraft.client.renderer.vertex.VertexFormatElement;
 import net.minecraft.entity.Entity;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.BlockRenderLayer;
@@ -62,6 +65,7 @@ public final class FrameProfiler {
      * them when investigating where the per-draw CPU time goes.
      */
     public static final boolean DETAILED_TIMING = "1".equals(System.getenv("VULKANMOD_DRAWTIMING"));
+    public static final boolean GPU_DRAW_TIMING = "1".equals(System.getenv("VULKANMOD_GPUDRAWTIMING"));
 
     /**
      * VULKANMOD_PROFILE_DUMP=1 forces Minecraft's own Profiler on for the whole
@@ -131,7 +135,33 @@ public final class FrameProfiler {
     private static long pushConstantCalls;
     private static long pushConstantSkips;
     private static long persistentDraws;
+    // DRAW-SOURCE split (rigorous draw attribution):
+    //   pDraw = persistentDraws = terrain (chunk VBOs) + entity (display-list replays).
+    //   onPersistentDraw routes each into terrainPersistentDraws vs entityPersistentDraws
+    //   via the inEntityReplay flag set around DisplayListManager.replayDraw.
+    private static long terrainPersistentDraws;
+    private static long entityPersistentDraws;
     private static long copiedDraws;
+    // cDraw = copiedDraws = immediate (per-frame buffer) draws, split by render phase:
+    //   WORLD  = inside renderWorld (tile entities, particles, held item, debug, world border)
+    //   OVERLAY= after renderWorld returns, inside updateCameraAndRender (pure GUI/HUD)
+    private static final int PHASE_WORLD = 0;
+    private static final int PHASE_OVERLAY = 1;
+    private static int drawPhase = PHASE_WORLD;
+    private static long immWorld;
+    private static long immOverlay;
+    // Immediate draws further classified by vertex format as a source hint:
+    //   immLmap  = POSITION_TEX_LMAP / POSITION_TEX_COLOR_LMAP  -> tile-entity / lit world geometry
+    //   immTex   = POSITION_TEX / POSITION_TEX_COLOR            -> GUI panels, particles, overlays
+    //   immLines = POSITION / POSITION_COLOR                    -> debug lines, selection box, wireframe
+    //   immBlock = BLOCK format                                -> chunk VBO drawn without a persistent buffer (~0)
+    //   immOther = anything else
+    private static long immLmap;
+    private static long immTex;
+    private static long immLines;
+    private static long immBlock;
+    private static long immOther;
+    private static boolean inEntityReplay;
 
     /**
      * Entity / display-list attribution.
@@ -194,6 +224,12 @@ public final class FrameProfiler {
     private static int gpuPassCount;
     /** Experiment B: offscreen render-pass count accumulated over the window. */
     private static int gpuOffCount;
+    // Per-draw GPU timing (vkCmdWriteTimestamp interval method, gated by GPU_DRAW_TIMING).
+    private static long gpuDrawTotalNanos;
+    private static long gpuDrawCount;
+    private static long gpuDrawMaxNanos;
+    private static final long[] GPU_DRAW_BUCKETS = {100, 250, 500, 1000, 2000, 5000, 10000, 20000, 50000, Long.MAX_VALUE};
+    private static long[] gpuDrawHist = new long[GPU_DRAW_BUCKETS.length];
 
     /** Client game-logic tick time (Minecraft.runTick), split out of the cpu total. */
     private static long gameTickNanos;
@@ -3284,11 +3320,12 @@ public final class FrameProfiler {
     public static final int CMD_SET_VIEWPORT = 12;
     public static final int CMD_SET_SCISSOR = 13;
     public static final int CMD_OTHER = 14;
-    private static final int CMD_COUNT = 15;
+    public static final int CMD_DRAW_MULTI_INDEXED = 15;
+    private static final int CMD_COUNT = 16;
     private static final String[] CMD_NAMES = {
             "DrawIndexed", "Draw", "BindPipeline", "BindVertex", "BindIndex", "BindDescriptor",
             "PushConstants", "PipelineBarrier", "CopyBuffer", "ClearAttachments", "BeginRendering",
-            "EndRendering", "SetViewport", "SetScissor", "Other"
+            "EndRendering", "SetViewport", "SetScissor", "Other", "DrawMultiIndexed"
     };
     private static final long[] cmdNanos = new long[CMD_COUNT];
     private static final long[] cmdCount = new long[CMD_COUNT];
@@ -3298,6 +3335,18 @@ public final class FrameProfiler {
             return;
         cmdCount[family]++;
         cmdNanos[family] += System.nanoTime() - start;
+    }
+
+    /**
+     * Count-only command increment (no timing, no DETAILED_TIMING gate). Used by
+     * the terrain batch path, which issues vkCmdDrawIndexed / vkCmdDrawMultiIndexedEXT
+     * directly (bypassing Drawer) and therefore never reaches addCmd - without this
+     * the [VKPROF] cmd line would under-count total DrawIndexed by the terrain count.
+     */
+    public static void addCmdCount(int family) {
+        if (!ENABLED)
+            return;
+        cmdCount[family]++;
     }
 
     /** Timestamp helper for the texture-upload path (not gated on DETAILED_TIMING). */
@@ -3624,15 +3673,69 @@ public final class FrameProfiler {
 
     /** A draw was issued straight out of a persistent vertex buffer. */
     public static void onPersistentDraw() {
-        if (ENABLED)
-            persistentDraws++;
+        if (!ENABLED)
+            return;
+        persistentDraws++;
+        if (inEntityReplay)
+            entityPersistentDraws++;
+        else
+            terrainPersistentDraws++;
     }
 
+    /** Set by DisplayListManager around the entity-model replay loop. */
+    public static void setEntityReplay(boolean on) {
+        inEntityReplay = on;
+    }
 
     /** A draw was issued after copying vertex data into the per-frame buffer. */
-    public static void onCopiedDraw() {
-        if (ENABLED)
-            copiedDraws++;
+    public static void onCopiedDraw(VertexFormat vertexFormat) {
+        if (!ENABLED)
+            return;
+        copiedDraws++;
+        if (drawPhase == PHASE_OVERLAY)
+            immOverlay++;
+        else
+            immWorld++;
+        classifyImmediateFormat(vertexFormat);
+    }
+
+    /**
+     * Source hint for an immediate draw: classify its vertex format. A draw that
+     * carries a lightmap UV (UV index 1) is tile-entity / lit-world geometry; one
+     * with a texture UV (UV index 0) but no lightmap is GUI / particle / overlay;
+     * one with neither is debug lines / selection box. BLOCK is the terrain format
+     * (chunk VBOs drawn without a persistent buffer, normally ~0). Classification
+     * is by element inspection so it works for both the {@code DefaultVertexFormats}
+     * singletons (used by vanilla Tessellator draws) and the fresh formats built
+     * by the glDrawArrays client-array path.
+     */
+    private static void classifyImmediateFormat(VertexFormat vf) {
+        if (vf == null) {
+            immOther++;
+            return;
+        }
+        if (vf == DefaultVertexFormats.BLOCK) {
+            immBlock++;
+            return;
+        }
+        boolean hasLightmap = false;
+        boolean hasTex = false;
+        for (VertexFormatElement e : vf.getElements()) {
+            if (e.getUsage() == VertexFormatElement.EnumUsage.UV) {
+                if (e.getIndex() == 1) {
+                    hasLightmap = true;
+                } else if (e.getIndex() == 0) {
+                    hasTex = true;
+                }
+            }
+        }
+        if (hasLightmap) {
+            immLmap++;
+        } else if (hasTex) {
+            immTex++;
+        } else {
+            immLines++;
+        }
     }
 
     /**
@@ -3711,6 +3814,7 @@ public final class FrameProfiler {
         if (!ENABLED)
             return;
 
+        drawPhase = PHASE_WORLD;
         final long now = System.nanoTime();
         camBeforeWorldNanos += now - camAtStart;
         camWorldStart = now;
@@ -3719,6 +3823,7 @@ public final class FrameProfiler {
     /** RETURN of EntityRenderer.renderWorld: closes the "world" segment. */
     public static void endRenderWorld() {
         if (ENABLED) {
+            drawPhase = PHASE_OVERLAY;
             final long now = System.nanoTime();
             camWorldNanos += now - camWorldStart;
             camWorldEnd = now;
@@ -3807,6 +3912,21 @@ public final class FrameProfiler {
     }
 
     /** Adds one GPU timestamp delta (nanoseconds) to the per-report accumulator. */
+    public static void onGpuDrawNanos(long seg) {
+        if (seg <= 0)
+            return;
+        gpuDrawTotalNanos += seg;
+        gpuDrawCount++;
+        if (seg > gpuDrawMaxNanos)
+            gpuDrawMaxNanos = seg;
+        for (int b = 0; b < GPU_DRAW_BUCKETS.length; b++) {
+            if (seg <= GPU_DRAW_BUCKETS[b]) {
+                gpuDrawHist[b]++;
+                break;
+            }
+        }
+    }
+
     public static void onGpuPassNanos(long nanos) {
         if (ENABLED)
             gpuPassNanos += nanos;
@@ -3863,7 +3983,7 @@ public final class FrameProfiler {
         final double gpuOffN = gpuOffCount / (double) frames;
 
         VulkanMod.LOGGER.info(
-                "[VKPROF] fps={} frame={}ms (cpu={} fence={} present={} submit={} gpuPass={}ms tick={}ms) apply={} aSkip={} draw={} draws={} binds={} descBind={} descSkip={} vbSkip={} vbB={} vbMs={} ibSkip={} descUpd={} mvp={} push={} pushSkip={} pDraw={} cDraw={} vbCopy={}MB ubo={}MB matOps={} mat={}ms dlReplay={} dlDraw={} dlMs={} dlApply={}ms camPre={} camWorld={} camPost={}ms lightmap={} pick={} pass={}ms mvpMs={} guard={}ms gpuMain={}ms gpuOff={}ms gpuPassN={} gpuOffN={}",
+                "[VKPROF] fps={} frame={}ms (cpu={} fence={} present={} submit={} gpuPass={}ms tick={}ms) apply={} aSkip={} draw={} draws={} binds={} descBind={} descSkip={} vbSkip={} vbB={} vbMs={} ibSkip={} descUpd={} mvp={} push={} pushSkip={} pDraw={} cDraw={} vbCopy={}MB ubo={}MB matOps={} mat={}ms dlReplay={} dlDraw={} dlMs={} dlApply={}ms camPre={} camWorld={} camPost={}ms lightmap={} pick={} pass={}ms mvpMs={} guard={}ms gpuMain={}ms gpuOff={}ms gpuPassN={} gpuOffN={} eDraw={} tDraw={} iWorld={} iOverlay={} iLmap={} iTex={} iLines={} iBlock={} iOther={}",
                 format(1000.0 / frameMs, 1), format(frameMs, 2), format(cpuMs, 2), format(fenceMs, 2),
                 format(presentMs, 2), format(submitMs, 2), format(gpuMs, 2), format(tickMs, 2),
                 DETAILED_TIMING ? format(applyMs, 2) : "n/a", format(shaderApplyReuses / (double) frames, 0),
@@ -3890,7 +4010,12 @@ public final class FrameProfiler {
                 format(worldPassNanos / 1e6 / frames, 2),
                 DETAILED_TIMING ? format(mvpRecalcNanos / 1e6 / frames, 2) : "n/a",
                 DETAILED_TIMING ? format(reuseGuardNanos / 1e6 / frames, 2) : "n/a",
-                format(gpuMainMs, 2), format(gpuOffMs, 2), format(gpuPassN, 1), format(gpuOffN, 1));
+                format(gpuMainMs, 2), format(gpuOffMs, 2), format(gpuPassN, 1), format(gpuOffN, 1),
+                format(entityPersistentDraws / (double) frames, 0), format(terrainPersistentDraws / (double) frames, 0),
+                format(immWorld / (double) frames, 0), format(immOverlay / (double) frames, 0),
+                format(immLmap / (double) frames, 0), format(immTex / (double) frames, 0),
+                format(immLines / (double) frames, 0), format(immBlock / (double) frames, 0),
+                format(immOther / (double) frames, 0));
 
         // Per-vkCmd-family CPU recording cost, on its own line so the positional
         // main report above is untouched. Format: Family=count/frameMs.
@@ -3905,6 +4030,25 @@ public final class FrameProfiler {
                    .append('/').append(format(cmdNanos[i] / 1e6 / frames, 4)).append("ms");
         }
         VulkanMod.LOGGER.info("[VKPROF] cmd {}", cmdLine.length() == 0 ? "none" : cmdLine);
+
+        // Per-draw GPU timing histogram: how many draws fall in each GPU-time
+        // bucket (microseconds). Answers whether the GPU pass is many tiny draws
+        // or a few heavy ones. Only emitted when VULKANMOD_GPUDRAWTIMING=1.
+        if (GPU_DRAW_TIMING && gpuDrawCount > 0) {
+            final StringBuilder h = new StringBuilder(160);
+            for (int b = 0; b < gpuDrawHist.length; b++) {
+                if (b > 0)
+                    h.append(' ');
+                h.append(format(gpuDrawHist[b] / (double) frames, 0));
+            }
+            VulkanMod.LOGGER.info(
+                "[VKPROF] gpudraw total={}ms avg={}ms max={}ms n={} | hist(us)<0.1/0.25/0.5/1/2/5/10/20/50/inf={}",
+                format(gpuDrawTotalNanos / 1e6 / frames, 3),
+                format(gpuDrawTotalNanos / 1e6 / gpuDrawCount, 4),
+                format(gpuDrawMaxNanos / 1e6, 4),
+                format(gpuDrawCount / (double) frames, 0),
+                h);
+        }
 
 
 
@@ -4540,12 +4684,28 @@ public final class FrameProfiler {
         pushConstantCalls = 0;
         pushConstantSkips = 0;
         persistentDraws = 0;
+        terrainPersistentDraws = 0;
+        entityPersistentDraws = 0;
         copiedDraws = 0;
+        immWorld = 0;
+        immOverlay = 0;
+        immLmap = 0;
+        immTex = 0;
+        immLines = 0;
+        immBlock = 0;
+        immOther = 0;
+        inEntityReplay = false;
+        drawPhase = PHASE_WORLD;
         gpuPassNanos = 0;
         gpuMainNanos = 0;
         gpuOffNanos = 0;
         gpuPassCount = 0;
         gpuOffCount = 0;
+        gpuDrawTotalNanos = 0;
+        gpuDrawCount = 0;
+        gpuDrawMaxNanos = 0;
+        for (int b = 0; b < gpuDrawHist.length; b++)
+            gpuDrawHist[b] = 0;
         gameTickNanos = 0;
         matrixOps = 0;
         matrixNanos = 0;

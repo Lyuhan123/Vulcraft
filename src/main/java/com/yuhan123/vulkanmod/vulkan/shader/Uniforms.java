@@ -45,10 +45,29 @@ public class Uniforms {
         vec3f_uniformMap.put("Light0_Direction", () -> VRenderSystem.lightDirection0);
         vec3f_uniformMap.put("Light1_Direction", () -> VRenderSystem.lightDirection1);
         vec3f_uniformMap.put("ModelOffset", () -> VRenderSystem.modelOffset);
+        // Camera position for the terrain fog distance. The batched and vanilla
+        // terrain paths both feed WORLD-space vertices to block.vsh; fog is a
+        // function of the vertex-to-camera distance, so the shader subtracts this.
+        // Without it the fog measured from the world origin and disappeared.
+        vec4f_uniformMap.put("ChunkOffset", () -> VRenderSystem.chunkOffset);
 
         //Vec4
         vec4f_uniformMap.put("ColorModulator", VRenderSystem::getShaderColor);
         vec4f_uniformMap.put("FogColor", VRenderSystem::getShaderFogColor);
+        // Per-entity lightmap coordinate, written by OpenGlHelper.setLightmapTextureCoords
+        // (RenderLivingBase.setBrightness) -> VRenderSystem.setLightmapCoord.
+        //
+        // Without a global supplier here the UBO field falls back to the shader's
+        // own VkUniform buffer (Pipeline.Builder.parseUboNode -> ShaderInstance
+        // .getUniformSupplier), and the only writer of those buffers,
+        // setDefaultUniforms(), has no callers - so LightmapCoord stayed at the
+        // JSON default (240,240), which samples the full-bright corner of the
+        // lightmap: every entity rendered unlit.
+        vec4f_uniformMap.put("LightmapCoord", () -> VRenderSystem.lightmapCoord);
+        // Mob hurt/burn flash colour (see VRenderSystem.setFlashColor). Without a
+        // global supplier the UBO field would bind to the shader-local VkUniform,
+        // which nothing writes, and the flash would stay invisible.
+        vec4f_uniformMap.put("EntityFlash", () -> VRenderSystem.flashColor);
 
     }
 

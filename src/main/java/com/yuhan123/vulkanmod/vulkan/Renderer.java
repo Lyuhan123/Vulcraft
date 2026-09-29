@@ -176,6 +176,16 @@ public class Renderer {
     private int[] gpuTimestampCount;
     private byte[][] gpuTimestampLabels;
 
+    // Per-draw GPU timestamp queries: one vkCmdWriteTimestamp before every
+    // vkCmdDrawIndexed/vkCmdDraw so each draw's GPU execution time is recovered
+    // from the interval to the next draw. Gated by VULKANMOD_GPUDRAWTIMING (off
+    // by default; writing ~700+ timestamps/frame has measurable CPU overhead).
+    // Pool sized for interval timing of up to GPU_DRAW_QUERY_COUNT-1 draws.
+    private static final boolean GPU_DRAW_TIMING = "1".equals(System.getenv("VULKANMOD_GPUDRAWTIMING"));
+    private static final int GPU_DRAW_QUERY_COUNT = 8192;
+    private long[] gpuDrawQueryPools;
+    private int[] gpuDrawQueryCount;
+
     public Renderer() {
         device = Vulkan.getVkDevice();
         framesNum = 3;
@@ -214,21 +224,32 @@ public class Renderer {
         this.gpuQueryPools = new long[framesNum];
         this.gpuTimestampCount = new int[framesNum];
         this.gpuTimestampLabels = new byte[framesNum][GPU_QUERY_COUNT];
+        this.gpuDrawQueryPools = new long[framesNum];
+        this.gpuDrawQueryCount = new int[framesNum];
 
         try (MemoryStack stack = stackPush()) {
-            VkQueryPoolCreateInfo poolInfo = VkQueryPoolCreateInfo.calloc(stack);
-            poolInfo.sType(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
-            poolInfo.queryType(VK_QUERY_TYPE_TIMESTAMP);
-            poolInfo.queryCount(GPU_QUERY_COUNT);
+            VkQueryPoolCreateInfo passInfo = VkQueryPoolCreateInfo.calloc(stack);
+            passInfo.sType(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
+            passInfo.queryType(VK_QUERY_TYPE_TIMESTAMP);
+            passInfo.queryCount(GPU_QUERY_COUNT);
+
+            VkQueryPoolCreateInfo drawInfo = VkQueryPoolCreateInfo.calloc(stack);
+            drawInfo.sType(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
+            drawInfo.queryType(VK_QUERY_TYPE_TIMESTAMP);
+            drawInfo.queryCount(GPU_DRAW_QUERY_COUNT);
 
             LongBuffer pPool = stack.mallocLong(1);
 
             for (int i = 0; i < framesNum; ++i) {
-                if (vkCreateQueryPool(device, poolInfo, null, pPool) != VK_SUCCESS) {
+                if (vkCreateQueryPool(device, passInfo, null, pPool) != VK_SUCCESS) {
                     throw new RuntimeException("Failed to create GPU timestamp query pool " + i);
                 }
-
                 this.gpuQueryPools[i] = pPool.get(0);
+
+                if (vkCreateQueryPool(device, drawInfo, null, pPool) != VK_SUCCESS) {
+                    throw new RuntimeException("Failed to create GPU draw-timestamp query pool " + i);
+                }
+                this.gpuDrawQueryPools[i] = pPool.get(0);
             }
         }
     }
@@ -249,6 +270,23 @@ public class Renderer {
         vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuQueryPools[slot], idx);
         gpuTimestampLabels[slot][idx] = label;
         gpuTimestampCount[slot] = idx + 1;
+    }
+
+    /**
+     * Per-draw GPU timing: records one timestamp right before a draw command so
+     * the draw's GPU execution time is recovered (interval to the next draw) by
+     * {@link #fetchGpuDrawNanos(int)}. Cheap vkCmdWriteTimestamp; capped at
+     * {@link #GPU_DRAW_QUERY_COUNT} per frame to avoid pool overflow.
+     */
+    public void writeGpuDrawTimestamp(VkCommandBuffer cb) {
+        if (!GPU_DRAW_TIMING || gpuDrawQueryPools == null)
+            return;
+        int slot = currentFrame;
+        int idx = gpuDrawQueryCount[slot];
+        if (idx >= GPU_DRAW_QUERY_COUNT)
+            return;
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuDrawQueryPools[slot], idx);
+        gpuDrawQueryCount[slot] = idx + 1;
     }
 
     /** Reads the finished timestamp set of this frame slot (fence already signaled). */
@@ -309,6 +347,37 @@ public class Renderer {
 
             FrameProfiler.onGpuPassNanos(total);
             FrameProfiler.onGpuPassBreakdown(mainNanos, offNanos, passCount, offCount);
+        }
+    }
+
+    /**
+     * Reads the per-draw GPU timestamps of this frame slot (fence already
+     * signaled) and feeds each draw's interval (to the next draw) to
+     * FrameProfiler for histogram aggregation. The interval between two
+     * consecutive draw-begin timestamps approximates the GPU time spent
+     * executing the earlier draw including its queued setup.
+     */
+    private void fetchGpuDrawNanos(int frameSlot) {
+        if (!GPU_DRAW_TIMING || this.gpuDrawQueryPools == null)
+            return;
+        int n = gpuDrawQueryCount[frameSlot];
+        if (n < 2)
+            return;
+        try (MemoryStack stack = stackPush()) {
+            LongBuffer results = stack.mallocLong(GPU_DRAW_QUERY_COUNT);
+            int result = vkGetQueryPoolResults(device, this.gpuDrawQueryPools[frameSlot], 0, n,
+                    results, Long.BYTES, VK_QUERY_RESULT_64_BIT);
+            if (result != VK_SUCCESS)
+                return;
+            long prev = -1;
+            for (int i = 0; i < n; i++) {
+                long t = results.get(i);
+                if (prev >= 0 && t > prev) {
+                    long seg = (long) ((t - prev) * this.timestampPeriodNanos);
+                    FrameProfiler.onGpuDrawNanos(seg);
+                }
+                prev = t;
+            }
         }
     }
 
@@ -437,6 +506,7 @@ public class Renderer {
         // The fence above guarantees this frame slot's previous command buffer
         // finished, so its timestamp pair is ready to be read.
         fetchGpuPassNanos(currentFrame);
+        fetchGpuDrawNanos(currentFrame);
 
         // Rebuild the mip chains of any texture uploaded last frame. Doing it
         // here - rather than inside the upload - means the level-0 data it
@@ -531,6 +601,12 @@ public class Renderer {
         vkCmdResetQueryPool(commandBuffer, gpuQueryPools[currentFrame], 0, GPU_QUERY_COUNT);
         FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __c1);
         gpuTimestampCount[currentFrame] = 0;
+        if (GPU_DRAW_TIMING) {
+            long __cd = FrameProfiler.start();
+            vkCmdResetQueryPool(commandBuffer, gpuDrawQueryPools[currentFrame], 0, GPU_DRAW_QUERY_COUNT);
+            FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __cd);
+            gpuDrawQueryCount[currentFrame] = 0;
+        }
         long __c2 = FrameProfiler.start();
         writeGpuTimestamp(commandBuffer, GPU_TS_MAIN);
         FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __c2);

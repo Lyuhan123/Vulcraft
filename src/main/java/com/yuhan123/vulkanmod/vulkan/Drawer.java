@@ -118,7 +118,7 @@ public class Drawer {
      * frame, which was the main CPU bottleneck.
      */
     public void draw(ByteBuffer vertexData, ByteBuffer indexData, int mode, VertexFormat vertexFormat, int vertexCount) {
-        FrameProfiler.onCopiedDraw();
+        FrameProfiler.onCopiedDraw(vertexFormat);
         VertexBuffer vertexBuffer = this.vertexBuffers[this.currentFrame];
         int size = vertexFormat.getSize() * vertexCount;
         vertexBuffer.copyBuffer(vertexData, size);
@@ -175,6 +175,7 @@ public class Drawer {
         bindIndexBuffer(commandBuffer, indexBuffer, indexType);
 
         long __c = FrameProfiler.start();
+        Renderer.getInstance().writeGpuDrawTimestamp(commandBuffer);
         vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, 0, 0);
         FrameProfiler.addCmd(FrameProfiler.CMD_DRAW_INDEXED, __c);
         FrameProfiler.onDraw();
@@ -194,6 +195,7 @@ public class Drawer {
         bindVertexBuffer(commandBuffer, vertexBuffer, vertexOffset);
 
         long __c = FrameProfiler.start();
+        Renderer.getInstance().writeGpuDrawTimestamp(commandBuffer);
         vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
         FrameProfiler.addCmd(FrameProfiler.CMD_DRAW, __c);
         FrameProfiler.onDraw();
@@ -285,6 +287,7 @@ public class Drawer {
         bindIndexBuffer(commandBuffer, indexBuffer, indexType);
 
         long __c = FrameProfiler.start();
+        Renderer.getInstance().writeGpuDrawTimestamp(commandBuffer);
         vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, firstVertex, firstInstance);
         FrameProfiler.addCmd(FrameProfiler.CMD_DRAW_INDEXED, __c);
         FrameProfiler.onDraw();
