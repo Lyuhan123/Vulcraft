@@ -1,5 +1,6 @@
 package com.yuhan123.vulkanmod.render.util;
 
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import net.minecraft.util.EnumFacing;
 
 import java.util.EnumSet;
@@ -9,7 +10,7 @@ import java.util.Set;
  * One-entry memo for {@code RenderGlobal.getVisibleFacings(BlockPos)}.
  *
  * <p>This was designed in pass 12, <b>retired on the strength of a static-camera
- * benchmark</b>, and reinstated when {@code VULKANMOD_FORCE_DIRTY} showed that
+ * benchmark</b>, and reinstated when {@code FORCE_DIRTY} showed that
  * benchmark was pricing the wrong thing. {@code setupTerrain} only runs its
  * visible-chunk selection when {@code displayListEntitiesDirty} is set, and the
  * benchmark camera stands still, so the flag tripped on 0.17 of frames and
@@ -37,17 +38,17 @@ import java.util.Set;
  *   <li>A stale entry culls chunks that should be drawn, which shows up as holes
  *       in the world and <b>not</b> as a wrong number in any harness here. So the
  *       key carries a generation that every content-changing event bumps, and
- *       {@code VULKANMOD_VF_MEMO_VERIFY=1} recomputes the truth on every hit and
+ *       {@code VF_MEMO_VERIFY=1} recomputes the truth on every hit and
  *       counts disagreements in {@code vfMemoBad} - a non-zero value means this
  *       must not ship.</li>
  * </ol>
  *
- * <p>{@code VULKANMOD_VF_MEMO=0} disables the memo.
+ * <p>{@code VF_MEMO=0} disables the memo.
  */
 public final class VisibleFacingsCache {
 
-    public static final boolean ENABLED = !"0".equals(System.getenv("VULKANMOD_VF_MEMO"));
-    public static final boolean VERIFY = "1".equals(System.getenv("VULKANMOD_VF_MEMO_VERIFY"));
+    public static final boolean ENABLED = VulkanModConfig.getBool("VF_MEMO", true);
+    public static final boolean VERIFY = VulkanModConfig.getBool("VF_MEMO_VERIFY", false);
 
     /**
      * Bumped by every event that can change a chunk section's contents. Volatile

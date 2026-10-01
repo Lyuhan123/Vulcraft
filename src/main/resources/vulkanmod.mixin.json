@@ -19,9 +19,6 @@
     "gui.RenderItemMixin",
     "chunk.ChunkRenderContainerMixin",
     "chunk.VboRenderListMixin",
-    "probe.EntityRendererProbesMixin",
-    "probe.RenderGlobalProbesMixin",
-    "probe.RenderManagerProbesMixin",
     "probe.RenderGlobalEntityWalkMixin"
   ],
   "mixins": [

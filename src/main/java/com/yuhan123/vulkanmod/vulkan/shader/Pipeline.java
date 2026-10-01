@@ -936,7 +936,7 @@ public abstract class Pipeline {
         /**
          * Variant with {@code layout(early_fragment_tests) in;} injected (discard
          * retained). Selected for the cutout single-pass draw when
-         * VULKANMOD_EARLYCUTOUT=1 is set (diagnostic only); re-attaches early tests
+         * EARLYCUTOUT=1 is set (diagnostic only); re-attaches early tests
          * but reintroduces the sky punch-through defect.
          */
         SPIRV fragEarlyTestSPIRV;

@@ -1,5 +1,6 @@
 package com.yuhan123.vulkanmod.render.shader;
 
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -97,15 +98,15 @@ public class ShaderInstance {
 
     /**
      * Benchmark switch for the terrain apply-reuse fast path. Default ON; set
-     * {@code VULKANMOD_APPLYREUSE=0} to force every chunk section through a full
+     * {@code APPLYREUSE=0} to force every chunk section through a full
      * apply(), which is what the A/B harness compares against.
      */
     private static final boolean REUSE_TERRAIN_STATE =
-            !"0".equals(System.getenv("VULKANMOD_APPLYREUSE"));
+            VulkanModConfig.getBool("APPLYREUSE", true);
 
     /**
      * Whether the reuse fast path is allowed beyond the terrain pipeline.
-     * Default ON; {@code VULKANMOD_REUSEALL=0} restores the historical gate
+     * Default ON; {@code REUSEALL=0} restores the historical gate
      * (terrain pipeline only, and only while the chunk arena is active), which
      * is what the A/B harness compares against.
      *
@@ -114,7 +115,7 @@ public class ShaderInstance {
      * (187 applies/frame, ~0.4 ms) on the full path for no reason.
      */
     private static final boolean REUSE_ALL =
-            !"0".equals(System.getenv("VULKANMOD_REUSEALL"));
+            VulkanModConfig.getBool("REUSEALL", true);
 
     /**
      * Uniform names whose values are covered by
@@ -464,14 +465,14 @@ public class ShaderInstance {
         final boolean timed = FrameProfiler.DETAILED_TIMING;
 
         // The INNER windows (flush / push / guard / book) are a second, finer gate
-        // than `timed`. Outside VULKANMOD_AB=APPTIME `seg == timed` exactly, so this
+        // than `timed`. Outside AB=APPTIME `seg == timed` exactly, so this
         // is inert; under APPTIME one arm closes them, which is what measures the
         // apparatus. The OUTER window (`__t`) and the counters the harnesses read by
         // name stay open in both arms, or the row would measure nothing.
         final boolean seg = timed && appSegmentsOn();
         final long __t = timed ? FrameProfiler.start() : 0L;
 
-        // Paired A/B arm for this call (VULKANMOD_AB=<flag>).
+        // Paired A/B arm for this call (AB=<flag>).
         //
         // Taken FIRST, before anything consults a flag, so the whole call - the
         // MVP flush, the guard, the publish - is measured under one arm.
@@ -544,7 +545,7 @@ public class ShaderInstance {
             }
         }
 
-        // Paired A/B arm for the memo (VULKANMOD_MEMOAB=1), a separate, older
+        // Paired A/B arm for the memo (MEMOAB=1), a separate, older
         // instrument with its own flip point inside PipelineState.
         final boolean __memoArm = PipelineState.memoAbEnabled() && PipelineState.nextMemoArm();
 
@@ -682,7 +683,7 @@ public class ShaderInstance {
         ++applySerial;
 
         // Only shaders the fast path may serve maintain a record - and only when
-        // it is enabled. With VULKANMOD_APPLYREUSE=0 this block never runs, which
+        // it is enabled. With APPLYREUSE=0 this block never runs, which
         // keeps the A/B honest: the reference case is then byte-for-byte the
         // pre-change apply().
         if (reuseTerrainStateOn() && reuseGateOk()) {
@@ -743,7 +744,7 @@ public class ShaderInstance {
      * serve at all? Independent of the current frame, so it is the same answer
      * on the publish side and on the reuse side.
      *
-     * <p>With {@code VULKANMOD_REUSEALL=0} this reproduces the original gate
+     * <p>With {@code REUSEALL=0} this reproduces the original gate
      * exactly (terrain pipeline, arena live). Otherwise eligibility is derived
      * from what the shader declares: a shader whose uniform set is fully
      * version-checked has nothing per-draw left for the skipped code to publish.
@@ -763,7 +764,7 @@ public class ShaderInstance {
     /**
      * Whether the reuse fast path may run at all this call.
      *
-     * <p>The paired A/B ({@code VULKANMOD_AB=APPLYREUSE}) makes this the arm's
+     * <p>The paired A/B ({@code AB=APPLYREUSE}) makes this the arm's
      * answer instead of the constant; with the instrument off the ternary folds
      * back to the original field read and costs nothing.
      */
@@ -771,7 +772,7 @@ public class ShaderInstance {
         return PairedAB.TARGET_APPLYREUSE ? PairedAB.arm() : REUSE_TERRAIN_STATE;
     }
 
-    /** Whether the gate is widened past the terrain pipeline. {@code VULKANMOD_AB=REUSEALL}. */
+    /** Whether the gate is widened past the terrain pipeline. {@code AB=REUSEALL}. */
     private static boolean reuseAllOn() {
         return PairedAB.TARGET_REUSEALL ? PairedAB.arm() : REUSE_ALL;
     }
@@ -780,7 +781,7 @@ public class ShaderInstance {
      * Whether this call opens the <em>inner</em> timing windows inside
      * {@code apply()} / {@code applyFull()} / {@code bindPipeline()}.
      *
-     * <p>Outside {@code VULKANMOD_AB=APPTIME} this is the constant {@code true}, so
+     * <p>Outside {@code AB=APPTIME} this is the constant {@code true}, so
      * {@code timed && appSegmentsOn()} folds to {@code timed} and the shipping build
      * is unchanged. Under {@code APPTIME} the two arms differ only in whether those
      * windows open, which makes the paired row the cost of the instrumentation
@@ -801,7 +802,7 @@ public class ShaderInstance {
      * <b>one</b> non-inlinable call instead of the current {@code apply()} +
      * {@code applyFull()} pair.
      *
-     * <p>Used only as the OFF arm of {@code VULKANMOD_AB=APPLYSPLIT}, to measure what
+     * <p>Used only as the OFF arm of {@code AB=APPLYSPLIT}, to measure what
      * the split is actually worth. It deliberately does <b>not</b> duplicate the
      * publish body - it calls the same {@link #applyFull()} the split path does - so
      * the only thing it adds is the call boundary the split removed.

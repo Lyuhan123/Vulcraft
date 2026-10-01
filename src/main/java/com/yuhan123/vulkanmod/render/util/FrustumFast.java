@@ -51,7 +51,7 @@ import net.minecraft.util.math.AxisAlignedBB;
  * there - so the maximum computed here is bit-identical to the maximum the
  * eight-term loop would compute. The two cannot disagree.
  *
- * <p>{@code VULKANMOD_BFS_FRUSTUM_VERIFY=1} checks that claim on every call
+ * <p>{@code BFS_FRUSTUM_VERIFY=1} checks that claim on every call
  * rather than taking it on trust; "algebraically identical" is precisely the
  * class of claim this project has been wrong about before.
  *

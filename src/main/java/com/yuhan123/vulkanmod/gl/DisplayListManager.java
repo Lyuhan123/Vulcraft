@@ -1,5 +1,6 @@
 package com.yuhan123.vulkanmod.gl;
 
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.render.PipelineManager;
 import com.yuhan123.vulkanmod.render.shader.ShaderInstance;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
@@ -65,12 +66,12 @@ public class DisplayListManager {
      * draws that agree on all of those therefore collapse into a single draw of
      * 4N vertices, which the QUADS index pattern expands identically.
      *
-     * VULKANMOD_DLMERGE=0 disables it, for A/B runs.
+     * DLMERGE=0 disables it, for A/B runs.
      */
-    private static final boolean MERGE_QUADS = !"0".equals(System.getenv("VULKANMOD_DLMERGE"));
+    private static final boolean MERGE_QUADS = VulkanModConfig.getBool("DLMERGE", true);
 
-    /** TEMPORARY: VULKANMOD_NOENTDRAW=1 skips entity display-list draws. See replayList. */
-    private static final boolean NO_ENT_DRAW = System.getenv("VULKANMOD_NOENTDRAW") != null;
+    /** TEMPORARY: NOENTDRAW=1 skips entity display-list draws. See replayList. */
+    private static final boolean NO_ENT_DRAW = VulkanModConfig.getBool("NOENTDRAW", false);
 
     // The real GL returns -1/0 for glGenLists (no display-list support on the
     // hidden context), so each glNewList gets a fresh INTERNAL id and the GL id
@@ -198,7 +199,7 @@ public class DisplayListManager {
             SCRATCH_MV.set(VRenderSystem.pullModelViewFloatBuffer());
             SCRATCH_PROJ.set(VRenderSystem.projectionFloatBuffer());
             SCRATCH_PV.set(SCRATCH_PROJ).mul(SCRATCH_MV);
-            // TEMPORARY: VULKANMOD_NOENTDRAW=1 suppresses entity display-list
+            // TEMPORARY: NOENTDRAW=1 suppresses entity display-list
             // draws. Rendering one fixed scene with and without them and diffing
             // isolates exactly which pixels entities contribute - which answers
             // whether they are scattered around the world or piled onto the

@@ -1,5 +1,6 @@
 package com.yuhan123.vulkanmod.vulkan;
 
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.render.PipelineManager;
 import com.yuhan123.vulkanmod.render.chunk.buffer.UploadManager;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
@@ -178,10 +179,10 @@ public class Renderer {
 
     // Per-draw GPU timestamp queries: one vkCmdWriteTimestamp before every
     // vkCmdDrawIndexed/vkCmdDraw so each draw's GPU execution time is recovered
-    // from the interval to the next draw. Gated by VULKANMOD_GPUDRAWTIMING (off
+    // from the interval to the next draw. Gated by GPUDRAWTIMING (off
     // by default; writing ~700+ timestamps/frame has measurable CPU overhead).
     // Pool sized for interval timing of up to GPU_DRAW_QUERY_COUNT-1 draws.
-    private static final boolean GPU_DRAW_TIMING = "1".equals(System.getenv("VULKANMOD_GPUDRAWTIMING"));
+    private static final boolean GPU_DRAW_TIMING = VulkanModConfig.getBool("GPUDRAWTIMING", false);
     private static final int GPU_DRAW_QUERY_COUNT = 8192;
     private long[] gpuDrawQueryPools;
     private int[] gpuDrawQueryCount;

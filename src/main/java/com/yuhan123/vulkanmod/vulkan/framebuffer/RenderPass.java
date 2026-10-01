@@ -232,7 +232,7 @@ public class RenderPass {
         return framebuffer;
     }
 
-    /** Depth load/store op of the bound pass - used by the VULKANMOD_DEPTHXRAY probe. */
+    /** Depth load/store op of the bound pass - used by the DEPTHXRAY probe. */
     public int getDepthLoadOp() {
         return depthAttachmentInfo != null ? depthAttachmentInfo.loadOp : -1;
     }

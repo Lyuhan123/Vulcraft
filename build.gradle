@@ -119,32 +119,12 @@ unimined.minecraft {
             // is not guaranteed to inherit the environment of whichever shell
             // started the build - which would silently turn an A/B into two runs
             // of the same configuration. Forward them explicitly.
-            ['MIP', 'ALPHADILATE', 'DLMERGE', 'DRAWTIMING', 'PROFILE_DUMP', 'GPUDRAWTIMING',
-             'AUTOJOIN', 'AUTOQUIT', 'BENCH_SECONDS', 'SHOT', 'SHOT_TAG',
-             'FRESH_WORLD', 'APPLYREUSE', 'REUSEALL',
-             'FREEZE', 'PIPESTATE', 'PIPESTATE_VERIFY', 'MEMOAB', 'AB',
-             'PROFILE_WARMUP', 'VF_FAST', 'VF_VERIFY', 'FORCE_DIRTY',
-             'VF_MEMO', 'VF_MEMO_VERIFY', 'BFS_FAST', 'BFS_VERIFY',
-             'BFS_FRUSTUM', 'BFS_FRUSTUM_VERIFY', 'BFS_BODY',
-             'BFS_MASK', 'BFS_MASK_VERIFY', 'BFS_T2', 'BFS_T2_VERIFY', 'ENT_ITER_TIME',
-             'BFS_ROW', 'BFS_ROW_VERIFY', 'BFS_PHASE',
-             'ENTPASS1', 'ENTPASS1_VERIFY',
-             'ENTPASS2', 'ENTPASS2_VERIFY',
-             'ENTIDX', 'ENTIDX_VERIFY',
-             // FLTMASK / FLTMASK_VERIFY were removed here in pass 23, restored in
-             // pass 24 to re-stage the record, and removed again when pass 24 closed
-             // it: the record is count-neutral and the loop it fed is already at its
-             // floor, so there is nothing left to arm. See FrameProfiler.FLMASK.
-             'TILEIDX', 'TILEIDX_VERIFY',
-             'BENCH_POS', 'BENCH_YAW', 'BENCH_PITCH', 'BENCH_CHEST', 'NOCULL', 'DEPTHBIAS',
-             'NOMIP', 'EARLYCUTOUT', 'THIRDPERSON', 'NOENTDRAW', 'DLPULL', 'XFPROBE',
-             'SKIPLAYER', 'ARENA', 'TERRAIN_BATCH', 'TB_NODRAW', 'INDIRECT', 'CLOUDDIAG'].each { name ->
-                def key = "VULKANMOD_${name}"
-                def value = System.getenv(key)
-                if (value != null) {
-                    environment(key, value)
-                }
-            }
+            // Runtime switches are no longer environment variables: they live in
+            // config/vulkanmod.properties and are read by VulkanModConfig, so
+            // there is nothing to forward through the daemon here. This used to
+            // matter because a long-lived daemon does not reliably inherit the
+            // caller's environment, which silently turned A/B runs into two runs
+            // of the same configuration.
 
             // Vulkan validation is a -D switch, not an env var. When the Intel
             // driver faults inside a Vulkan entry point the stack only names the

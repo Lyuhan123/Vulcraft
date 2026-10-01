@@ -1,5 +1,6 @@
 package com.yuhan123.vulkanmod.vulkan.shader;
 
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 //import com.mojang.blaze3d.platform.GlStateManager;
 import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import com.yuhan123.vulkanmod.vulkan.framebuffer.RenderPass;
@@ -32,17 +33,17 @@ public class PipelineState {
     private static final int MAX_CACHED_STATES = 64;
 
     /**
-     * Opt-out for the input-snapshot memo (pass 10): {@code VULKANMOD_PIPESTATE=0}.
+     * Opt-out for the input-snapshot memo (pass 10): {@code PIPESTATE=0}.
      *
      * <p>The lookup runs ~1800 times a frame - once per {@code apply()} through
      * the reuse guard and once per {@code flushPipelineBind()} - and each call
      * spent five state encodes (six blend fields, a depth switch, a logic-op
      * switch) to produce an answer that only changes ~12 times a frame.
      */
-    private static final boolean MEMO_DEFAULT = !"0".equals(System.getenv("VULKANMOD_PIPESTATE"));
+    private static final boolean MEMO_DEFAULT = VulkanModConfig.getBool("PIPESTATE", true);
 
     /**
-     * Paired within-frame A/B ({@code VULKANMOD_MEMOAB=1}).
+     * Paired within-frame A/B ({@code MEMOAB=1}).
      *
      * <p>Exists because a two-launch A/B cannot resolve this change. Run
      * back-to-back in one session the memo measured −69 ns/call; run in the
@@ -62,7 +63,7 @@ public class PipelineState {
      * not the 17 stores it also skips in a real {@code PIPESTATE=0} build. It is
      * therefore a conservative estimate.
      */
-    private static final boolean MEMO_AB = "1".equals(System.getenv("VULKANMOD_MEMOAB"));
+    private static final boolean MEMO_AB = VulkanModConfig.getBool("MEMOAB", false);
 
     /**
      * Whether the memo is consulted right now. Deliberately not {@code final}:
@@ -93,7 +94,7 @@ public class PipelineState {
     private static final boolean SNAPSHOT = MEMO_DEFAULT || MEMO_AB;
 
     /**
-     * {@code VULKANMOD_PIPESTATE_VERIFY=1} re-derives the state on every memo hit
+     * {@code PIPESTATE_VERIFY=1} re-derives the state on every memo hit
      * and counts disagreements. This is the correctness instrument for the memo,
      * and it is the only thing that can catch a missed input: run it once after
      * touching anything that writes a GL pipeline-state value.
@@ -101,7 +102,7 @@ public class PipelineState {
      * <p>Only meaningful on its own - it makes the hit/derive counters nonsense
      * because it drives both paths on every call.
      */
-    private static final boolean MEMO_VERIFY = "1".equals(System.getenv("VULKANMOD_PIPESTATE_VERIFY"));
+    private static final boolean MEMO_VERIFY = VulkanModConfig.getBool("PIPESTATE_VERIFY", false);
 
     /**
      * Snapshot of the raw GL inputs the last memoised result was derived from.

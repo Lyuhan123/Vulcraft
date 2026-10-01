@@ -1,5 +1,7 @@
 package com.yuhan123.vulkanmod.mixin.gui;
 
+import com.yuhan123.vulkanmod.VKProf;
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.VulkanMod;
 import net.minecraft.client.gui.GuiMainMenu;
 import net.minecraft.client.gui.GuiScreen;
@@ -14,7 +16,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class GuiMainMenuMixin extends GuiScreen {
 
     /**
-     * Headless-bench hook: with VULKANMOD_AUTOJOIN=1, load the "New World" save
+     * Headless-bench hook: with AUTOJOIN=1, load the "New World" save
      * 4 seconds after the main menu appears so automated runClient measurements
      * reach an in-world scene without manual interaction. No-op otherwise.
      */
@@ -30,7 +32,7 @@ public abstract class GuiMainMenuMixin extends GuiScreen {
 
     @Inject(method = "drawScreen", at = @At("TAIL"))
     private void vulkanmod$autoJoin(CallbackInfo ci) {
-        if (vulkanmod$autoJoinFired || !"1".equals(System.getenv("VULKANMOD_AUTOJOIN"))) {
+        if (vulkanmod$autoJoinFired || !VulkanModConfig.getBool("AUTOJOIN", false)) {
             return;
         }
 
@@ -43,7 +45,7 @@ public abstract class GuiMainMenuMixin extends GuiScreen {
         }
 
         vulkanmod$autoJoinFired = true;
-        VulkanMod.LOGGER.info("[VKPROF] auto-joining save 'New World'");
+        VKProf.info("[VKPROF] auto-joining save 'New World'");
         this.mc.launchIntegratedServer("New World", "New World", (WorldSettings) null);
     }
 }

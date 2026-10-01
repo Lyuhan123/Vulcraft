@@ -52,11 +52,11 @@ package com.yuhan123.vulkanmod.render.util;
  * <p>The mirror is a <b>cache</b>, so it carries the failure mode this project
  * treats as the dangerous one &mdash; a stale entry removes chunks from the world
  * and shows up as holes rather than as a wrong number in any harness here. It is
- * therefore never trusted on argument: {@code VULKANMOD_BFS_ROW_VERIFY=1}
+ * therefore never trusted on argument: {@code BFS_ROW_VERIFY=1}
  * recomputes the row from the real {@code BitSet} on every call, counts
  * disagreements in {@code [VKPROF] bfsrow bad=} (must be 0) and returns the
  * <b>real</b> answer, so a wrong mirror cannot draw a wrong scene even during a
- * correctness run. {@code VULKANMOD_BFS_ROW=0} restores the per-facing calls.
+ * correctness run. {@code BFS_ROW=0} restores the per-facing calls.
  */
 public interface VisibilityRow {
 
@@ -72,7 +72,7 @@ public interface VisibilityRow {
      * The same six bits, read out of the real {@code BitSet} through the real
      * {@code isVisible} index formula rather than out of the mirror.
      *
-     * <p>Exists so {@code VULKANMOD_BFS_ROW_VERIFY=1} compares against the actual
+     * <p>Exists so {@code BFS_ROW_VERIFY=1} compares against the actual
      * store instead of against a transcription of it. That is the only form of
      * reference this project accepts, and it is what caught the window-local
      * chunk-position bug in pass 13.

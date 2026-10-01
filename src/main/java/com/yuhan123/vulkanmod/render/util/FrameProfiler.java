@@ -1,5 +1,7 @@
 package com.yuhan123.vulkanmod.render.util;
 
+import com.yuhan123.vulkanmod.VKProf;
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.VulkanMod;
 
 import java.util.Arrays;
@@ -61,20 +63,20 @@ public final class FrameProfiler {
      * around a millisecond - enough to distort the very measurement it reports.
      *
      * The counters (draws, binds, descriptor updates, bytes) stay on either way;
-     * only these two timings are gated. Set VULKANMOD_DRAWTIMING=1 to re-enable
+     * only these two timings are gated. Set DRAWTIMING=1 to re-enable
      * them when investigating where the per-draw CPU time goes.
      */
-    public static final boolean DETAILED_TIMING = "1".equals(System.getenv("VULKANMOD_DRAWTIMING"));
-    public static final boolean GPU_DRAW_TIMING = "1".equals(System.getenv("VULKANMOD_GPUDRAWTIMING"));
+    public static final boolean DETAILED_TIMING = VulkanModConfig.getBool("DRAWTIMING", false);
+    public static final boolean GPU_DRAW_TIMING = VulkanModConfig.getBool("GPUDRAWTIMING", false);
 
     /**
-     * VULKANMOD_PROFILE_DUMP=1 forces Minecraft's own Profiler on for the whole
+     * PROFILE_DUMP=1 forces Minecraft's own Profiler on for the whole
      * run and dumps its section tree at auto-quit, which attributes the parts of
      * the frame the mod's own report cannot see (terrain vs entities vs
      * updatechunks vs clouds). Read by ProfilerMixin, which is why the flag lives
      * here rather than in the mixin.
      */
-    public static final boolean PROFILE_DUMP = "1".equals(System.getenv("VULKANMOD_PROFILE_DUMP"));
+    public static final boolean PROFILE_DUMP = VulkanModConfig.getBool("PROFILE_DUMP", false);
 
     private static final int REPORT_INTERVAL = 120;
 
@@ -263,7 +265,7 @@ public final class FrameProfiler {
     private static long matLoadIdentity;
 
     /**
-     * Deferred per-chunk transform (VULKANMOD_CHUNKXF).
+     * Deferred per-chunk transform (CHUNKXF).
      *
      * `matOps` shows ~4 matrix ops per chunk section (push / translate /
      * multMatrix / pop around each section's single draw). `xfFused` counts the
@@ -335,7 +337,7 @@ public final class FrameProfiler {
 
     /**
      * Reuses that happened on a shader other than the terrain pipeline, i.e. the
-     * ones the generalised gate (VULKANMOD_REUSEALL) unlocked. Must be ~0 with
+     * ones the generalised gate (REUSEALL) unlocked. Must be ~0 with
      * the flag off, and should track the entity/display-list applies with it on -
      * a frame-time win with this at 0 would mean the gate did not widen.
      */
@@ -499,7 +501,7 @@ public final class FrameProfiler {
 
     /**
      * Paired within-frame A/B for the {@code PipelineState} memo
-     * ({@code VULKANMOD_MEMOAB=1}).
+     * ({@code MEMOAB=1}).
      *
      * <p>A two-launch A/B could not resolve this change: the memo measured
      * −69 ns/call in one order and +23 ns/call in the other, and in both orders
@@ -510,7 +512,7 @@ public final class FrameProfiler {
      *
      * <p>{@code armA} is the memo arm, {@code armB} the full-encode arm.
      */
-    public static final boolean MEMO_AB = "1".equals(System.getenv("VULKANMOD_MEMOAB"));
+    public static final boolean MEMO_AB = VulkanModConfig.getBool("MEMOAB", false);
 
     private static long abMemoNanos;
     private static long abMemoCalls;
@@ -605,7 +607,7 @@ public final class FrameProfiler {
     }
 
     /**
-     * {@code VULKANMOD_PIPESTATE_VERIFY=1} only: the memo said "unchanged" but a
+     * {@code PIPESTATE_VERIFY=1} only: the memo said "unchanged" but a
      * full re-derive disagreed. **Any non-zero value here is a real bug** - the
      * snapshot is missing an input - and the memo must not ship until it is 0.
      */
@@ -722,7 +724,7 @@ public final class FrameProfiler {
     private static long bfsBad;
     private static long bfsStart;
 
-    /** Paired A/B of the neighbour probe ({@code VULKANMOD_AB=BFS}). */
+    /** Paired A/B of the neighbour probe ({@code AB=BFS}). */
     private static long abBfsOnNanos;
     private static long abBfsOnCalls;
     private static long abBfsOffNanos;
@@ -775,7 +777,7 @@ public final class FrameProfiler {
      * <p><b>How much of this line is populated in a shipped build.</b>
      * {@code polls} and {@code frN} are always on (both come from a redirect
      * that does real work). {@code pNs}, {@code frNs} and {@code frBad} need
-     * {@code VULKANMOD_BFS_BODY=1}. {@code sfN}, {@code sfTrue}, {@code viN} and
+     * {@code BFS_BODY=1}. {@code sfN}, {@code sfTrue}, {@code viN} and
      * {@code oppN} came from three diagnostic redirects - on
      * {@code setFrameIndex}, {@code CompiledChunk.isVisible} and
      * {@code getOpposite} - which were <b>removed</b> after pass 14 because a
@@ -809,14 +811,14 @@ public final class FrameProfiler {
     /** Stride counter for the sampled timings above. */
     private static int bfsSampleTick;
 
-    /** Paired A/B of the frustum test ({@code VULKANMOD_AB=FRUSTUM}). */
+    /** Paired A/B of the frustum test ({@code AB=FRUSTUM}). */
     private static long abFrOnNanos;
     private static long abFrOnCalls;
     private static long abFrOffNanos;
     private static long abFrOffCalls;
 
     /**
-     * Paired A/B of the BFS term-1 hoist ({@code VULKANMOD_AB=BFSMASK}). The
+     * Paired A/B of the BFS term-1 hoist ({@code AB=BFSMASK}). The
      * block unit is a <b>poll</b> (892 a frame at rd 12), not a probe, so
      * {@code dMkNs} is ns per poll and the frame effect is that times the poll
      * rate. Kept separate from the {@code bfs*} pair on purpose: the two numbers
@@ -846,10 +848,10 @@ public final class FrameProfiler {
      * that), and the only defence is a field on the row that says so.
      */
     private static final int BFS_ROW_ON =
-            "0".equals(System.getenv("VULKANMOD_BFS_ROW")) ? 0 : 1;
+            "0".equals(VulkanModConfig.get("BFS_ROW")) ? 0 : 1;
 
     private static final int BFS_ROW_VERIFY_ON =
-            "1".equals(System.getenv("VULKANMOD_BFS_ROW_VERIFY")) ? 1 : 0;
+            VulkanModConfig.getBool("BFS_ROW_VERIFY", false) ? 1 : 0;
 
     // ------------------------------------------------------------------
     // Pass 16: the two sections the shim has never directly instrumented
@@ -1075,7 +1077,7 @@ public final class FrameProfiler {
     // ------------------------------------------------------------------
 
     /**
-     * {@code VULKANMOD_FLTMASK} - the per-frame render-info record. <b>Default OFF,
+     * {@code FLTMASK} - the per-frame render-info record. <b>Default OFF,
      * and that is the result of pass 20 rather than an oversight.</b>
      *
      * <p>It works and it is verified, but pass 20 measured it as not paying. Both
@@ -1431,7 +1433,7 @@ public final class FrameProfiler {
         return cc.getTileEntities();
     }
 
-    // Paired A/B of the record (VULKANMOD_AB=FLTMASK).
+    // Paired A/B of the record (AB=FLTMASK).
     //
     // Two consumers, two column pairs, two units - and each one's decision point is
     // its own sample point:
@@ -1555,7 +1557,7 @@ public final class FrameProfiler {
     // ------------------------------------------------------------------
 
     /**
-     * Pass-1 reuse of pass 0's empty-chunk findings ({@code VULKANMOD_ENTPASS1},
+     * Pass-1 reuse of pass 0's empty-chunk findings ({@code ENTPASS1},
      * default ON; {@code =0} opts out).
      *
      * <p>The saving is the <b>probe</b>, not the entity loop: 892 iterations of
@@ -1565,10 +1567,10 @@ public final class FrameProfiler {
      * load. Pass 16 measured that chain at ~1.11 µs an iteration, which is why a
      * second walk of an all-but-empty scene costs as much as the first.
      */
-    private static final boolean ENT_PASS1 = !"0".equals(System.getenv("VULKANMOD_ENTPASS1"));
+    private static final boolean ENT_PASS1 = VulkanModConfig.getBool("ENTPASS1", true);
 
     /**
-     * Pass-1 <b>loop compaction</b> ({@code VULKANMOD_ENTPASS2}, default ON;
+     * Pass-1 <b>loop compaction</b> ({@code ENTPASS2}, default ON;
      * {@code =0} opts out).
      *
      * <p>Pass 17 made an iteration pass 0 had found empty cheap, but still paid
@@ -1588,7 +1590,7 @@ public final class FrameProfiler {
      * {@code ENTPASS1_VERIFY} already checks: within one {@code renderWorldPass}
      * the emptiness of each render info is stable between pass 0 and pass 1.
      */
-    private static final boolean ENT_PASS2 = !"0".equals(System.getenv("VULKANMOD_ENTPASS2"));
+    private static final boolean ENT_PASS2 = VulkanModConfig.getBool("ENTPASS2", true);
 
     /**
      * Bench-only correctness gate for the compaction. Default OFF.
@@ -1600,11 +1602,11 @@ public final class FrameProfiler {
      * chunk's entities) and {@code extra}. It must read {@code miss=0 extra=0
      * bad=0} in every window.
      *
-     * <p>This is the same comparison {@code VULKANMOD_ENTPASS1_VERIFY} makes, so
+     * <p>This is the same comparison {@code ENTPASS1_VERIFY} makes, so
      * setting either one enables it.
      */
     private static final boolean ENT_PASS2_VERIFY =
-            "1".equals(System.getenv("VULKANMOD_ENTPASS2_VERIFY"));
+            VulkanModConfig.getBool("ENTPASS2_VERIFY", false);
 
     /**
      * Bench-only. Takes the <b>unmodified</b> path in pass 1 and compares each
@@ -1612,7 +1614,7 @@ public final class FrameProfiler {
      * shows up as a count instead of as a silently missing entity. Default OFF.
      */
     private static final boolean ENT_PASS1_VERIFY =
-            ENT_PASS2_VERIFY || "1".equals(System.getenv("VULKANMOD_ENTPASS1_VERIFY"));
+            ENT_PASS2_VERIFY || VulkanModConfig.getBool("ENTPASS1_VERIFY", false);
 
     /**
      * True when either pass-1 change is enabled. The index/record bookkeeping is
@@ -1622,7 +1624,7 @@ public final class FrameProfiler {
     private static final boolean ENT_TRACK = ENT_PASS1 || ENT_PASS2;
 
     /**
-     * Pass-0 entity-walk index gate ({@code VULKANMOD_ENTIDX}, default ON;
+     * Pass-0 entity-walk index gate ({@code ENTIDX}, default ON;
      * {@code =0} opts out).
      *
      * <p>Pass 18 split the entity phase and found that every pass since 16 had been
@@ -1647,10 +1649,10 @@ public final class FrameProfiler {
      * <p>Requires {@code ENTPASS1}: the skip rides on the same pass-0 record, and
      * the {@code getEntityLists} redirect that answers it is guarded by that flag.
      */
-    private static final boolean ENT_IDX = !"0".equals(System.getenv("VULKANMOD_ENTIDX"));
+    private static final boolean ENT_IDX = VulkanModConfig.getBool("ENTIDX", true);
 
     /**
-     * Correctness gate for {@link #ENT_IDX} ({@code VULKANMOD_ENTIDX_VERIFY=1}).
+     * Correctness gate for {@link #ENT_IDX} ({@code ENTIDX_VERIFY=1}).
      *
      * <p>Takes the vanilla probe on every iteration and compares, at the
      * {@code isEmpty()} call site, the real answer against the index's verdict for
@@ -1660,10 +1662,10 @@ public final class FrameProfiler {
      * direction. Makes the timing meaningless, so it is a correctness run only.
      */
     private static final boolean ENT_IDX_VERIFY =
-            "1".equals(System.getenv("VULKANMOD_ENTIDX_VERIFY"));
+            VulkanModConfig.getBool("ENTIDX_VERIFY", false);
 
     /**
-     * Pass-1 <b>tile-loop compaction</b> ({@code VULKANMOD_TILEIDX}, default ON;
+     * Pass-1 <b>tile-loop compaction</b> ({@code TILEIDX}, default ON;
      * {@code =0} opts out).
      *
      * <p>{@code renderEntities} runs twice a frame (Forge's two render passes) and
@@ -1695,7 +1697,7 @@ public final class FrameProfiler {
      * <p>What is <b>not</b> assumed is that the answer stays true between the two
      * calls. {@code TILEIDX_VERIFY} takes the full walk in pass 1 and re-derives it.
      */
-    private static final boolean TILE_IDX = !"0".equals(System.getenv("VULKANMOD_TILEIDX"));
+    private static final boolean TILE_IDX = VulkanModConfig.getBool("TILEIDX", true);
 
     /**
      * Bench-only correctness gate for the tile-loop compaction. Default OFF.
@@ -1709,7 +1711,7 @@ public final class FrameProfiler {
      * silently off.
      */
     private static final boolean TILE_IDX_VERIFY =
-            "1".equals(System.getenv("VULKANMOD_TILEIDX_VERIFY"));
+            VulkanModConfig.getBool("TILEIDX_VERIFY", false);
 
     /** True when the tile record has to be maintained at all. */
     private static final boolean TILE_TRACK = TILE_IDX || TILE_IDX_VERIFY;
@@ -2184,7 +2186,7 @@ public final class FrameProfiler {
 
     // ------------------------------------------------------------------
     // Pass 21: pass 1's tile-entity loop iterates only the sections that have
-    // tile entities (VULKANMOD_TILEIDX).
+    // tile entities (TILEIDX).
     //
     // Pass 0's tile loop reads `getTileEntities()` on all 892 entries anyway, so
     // it records the non-empty indices for free; pass 1's for-each is handed an
@@ -2311,7 +2313,7 @@ public final class FrameProfiler {
         return list.iterator();
     }
 
-    // Paired A/B of the tile-loop compaction (VULKANMOD_AB=TILEIDX).
+    // Paired A/B of the tile-loop compaction (AB=TILEIDX).
     //
     // The arm is chosen once per frame at pass-0 HEAD so both calls of a frame
     // agree; the window is the whole pass-1 tile loop, opened where its iterator is
@@ -2657,7 +2659,7 @@ public final class FrameProfiler {
         entPass1Flush();
     }
 
-    // Paired A/B of the pass-1 reuse (VULKANMOD_AB=ENTPASS1). Blocks of 64
+    // Paired A/B of the pass-1 reuse (AB=ENTPASS1). Blocks of 64
     // iterations - the same length every other paired target uses - so the
     // reported mean is ns per iteration and the frame effect is that times 892
     // (only pass 1 is eligible).
@@ -2703,7 +2705,7 @@ public final class FrameProfiler {
         }
     }
 
-    // Paired A/B of the pass-1 loop compaction (VULKANMOD_AB=ENTPASS2).
+    // Paired A/B of the pass-1 loop compaction (AB=ENTPASS2).
     //
     // The arm is chosen once per frame at pass-0 HEAD, so both calls of a frame
     // agree; the window is the whole pass-1 loop, opened where its iterator is
@@ -2738,7 +2740,7 @@ public final class FrameProfiler {
         }
     }
 
-    // Paired A/B of the pass-0 index gate (VULKANMOD_AB=ENTIDX).
+    // Paired A/B of the pass-0 index gate (AB=ENTIDX).
     //
     // The flip point is the decision point - inside the world.getChunk redirect,
     // once per iteration - and the block is timed there too, so a block spans 64
@@ -2826,7 +2828,7 @@ public final class FrameProfiler {
      * see {@link #onEntIteration} for why the meter has to be optional here.
      */
     private static final boolean ENT_ITER_TIME =
-            "1".equals(System.getenv("VULKANMOD_ENT_ITER_TIME"));
+            VulkanModConfig.getBool("ENT_ITER_TIME", false);
 
     public static void onEntIteration() {
         if (!ENABLED)
@@ -3122,7 +3124,7 @@ public final class FrameProfiler {
      * the mixin, so the row states what the client process received.
      */
     private static final int BFS_PHASE_ON =
-            "1".equals(System.getenv("VULKANMOD_BFS_PHASE")) ? 1 : 0;
+            VulkanModConfig.getBool("BFS_PHASE", false) ? 1 : 0;
 
     /**
      * The pass-26 split of one BFS poll into its two halves, sampled 1-in-8.
@@ -3301,7 +3303,7 @@ public final class FrameProfiler {
 
     // ---- Per-vkCmd-family CPU recording time -------------------------------
     // Every vkCmd* call site wraps itself with start()/addCmd(family, start).
-    // Gated on DETAILED_TIMING (VULKANMOD_DRAWTIMING=1). These counters are
+    // Gated on DETAILED_TIMING (DRAWTIMING=1). These counters are
     // intentionally SEPARATE from the dedicated count hooks (onPipelineBind,
     // onPushConstants, draws, vertexBinds, descriptorBinds) so the existing
     // [VKPROF] positional report is unchanged and nothing is double-counted.
@@ -3574,7 +3576,7 @@ public final class FrameProfiler {
     // outside the world, a fractional one, or a scale that is not 1 is the
     // fingerprint of the draw that stretches a section across the view.
     // ------------------------------------------------------------------
-    private static final boolean XFPROBE = "1".equals(System.getenv("VULKANMOD_XFPROBE"));
+    private static final boolean XFPROBE = VulkanModConfig.getBool("XFPROBE", false);
 
     private static float xfMinX = Float.MAX_VALUE, xfMaxX = -Float.MAX_VALUE;
     private static float xfMinY = Float.MAX_VALUE, xfMaxY = -Float.MAX_VALUE;
@@ -3767,7 +3769,7 @@ public final class FrameProfiler {
         }
 
         // Paired A/B attribution for the transform flag. Constant-folded away
-        // when VULKANMOD_AB is not naming a flag, so this costs nothing in play.
+        // when AB is not naming a flag, so this costs nothing in play.
         if (PairedAB.ACTIVE) {
             addAbMatrixOp(start, PairedAB.arm());
         }
@@ -3960,6 +3962,11 @@ public final class FrameProfiler {
     }
 
     private static void report() {
+        // Debug aid. When profiling is off this returns before any of the ~25
+        // per-frame VKPROF lines are formatted, so the runtime pays nothing.
+        if (!VulkanModConfig.profiling()) {
+            return;
+        }
         final double frameMs = totalNanos / 1e6 / frames;
         final double fenceMs = fenceWaitNanos / 1e6 / frames;
         final double submitMs = submitNanos / 1e6 / frames;
@@ -3982,8 +3989,7 @@ public final class FrameProfiler {
         final double gpuPassN = gpuPassCount / (double) frames;
         final double gpuOffN = gpuOffCount / (double) frames;
 
-        VulkanMod.LOGGER.info(
-                "[VKPROF] fps={} frame={}ms (cpu={} fence={} present={} submit={} gpuPass={}ms tick={}ms) apply={} aSkip={} draw={} draws={} binds={} descBind={} descSkip={} vbSkip={} vbB={} vbMs={} ibSkip={} descUpd={} mvp={} push={} pushSkip={} pDraw={} cDraw={} vbCopy={}MB ubo={}MB matOps={} mat={}ms dlReplay={} dlDraw={} dlMs={} dlApply={}ms camPre={} camWorld={} camPost={}ms lightmap={} pick={} pass={}ms mvpMs={} guard={}ms gpuMain={}ms gpuOff={}ms gpuPassN={} gpuOffN={} eDraw={} tDraw={} iWorld={} iOverlay={} iLmap={} iTex={} iLines={} iBlock={} iOther={}",
+        VKProf.info("[VKPROF] fps={} frame={}ms (cpu={} fence={} present={} submit={} gpuPass={}ms tick={}ms) apply={} aSkip={} draw={} draws={} binds={} descBind={} descSkip={} vbSkip={} vbB={} vbMs={} ibSkip={} descUpd={} mvp={} push={} pushSkip={} pDraw={} cDraw={} vbCopy={}MB ubo={}MB matOps={} mat={}ms dlReplay={} dlDraw={} dlMs={} dlApply={}ms camPre={} camWorld={} camPost={}ms lightmap={} pick={} pass={}ms mvpMs={} guard={}ms gpuMain={}ms gpuOff={}ms gpuPassN={} gpuOffN={} eDraw={} tDraw={} iWorld={} iOverlay={} iLmap={} iTex={} iLines={} iBlock={} iOther={}",
                 format(1000.0 / frameMs, 1), format(frameMs, 2), format(cpuMs, 2), format(fenceMs, 2),
                 format(presentMs, 2), format(submitMs, 2), format(gpuMs, 2), format(tickMs, 2),
                 DETAILED_TIMING ? format(applyMs, 2) : "n/a", format(shaderApplyReuses / (double) frames, 0),
@@ -4029,11 +4035,11 @@ public final class FrameProfiler {
                    .append(format(cmdCount[i] / (double) frames, 0))
                    .append('/').append(format(cmdNanos[i] / 1e6 / frames, 4)).append("ms");
         }
-        VulkanMod.LOGGER.info("[VKPROF] cmd {}", cmdLine.length() == 0 ? "none" : cmdLine);
+        VKProf.info("[VKPROF] cmd {}", cmdLine.length() == 0 ? "none" : cmdLine);
 
         // Per-draw GPU timing histogram: how many draws fall in each GPU-time
         // bucket (microseconds). Answers whether the GPU pass is many tiny draws
-        // or a few heavy ones. Only emitted when VULKANMOD_GPUDRAWTIMING=1.
+        // or a few heavy ones. Only emitted when GPUDRAWTIMING=1.
         if (GPU_DRAW_TIMING && gpuDrawCount > 0) {
             final StringBuilder h = new StringBuilder(160);
             for (int b = 0; b < gpuDrawHist.length; b++) {
@@ -4041,8 +4047,7 @@ public final class FrameProfiler {
                     h.append(' ');
                 h.append(format(gpuDrawHist[b] / (double) frames, 0));
             }
-            VulkanMod.LOGGER.info(
-                "[VKPROF] gpudraw total={}ms avg={}ms max={}ms n={} | hist(us)<0.1/0.25/0.5/1/2/5/10/20/50/inf={}",
+            VKProf.info("[VKPROF] gpudraw total={}ms avg={}ms max={}ms n={} | hist(us)<0.1/0.25/0.5/1/2/5/10/20/50/inf={}",
                 format(gpuDrawTotalNanos / 1e6 / frames, 3),
                 format(gpuDrawTotalNanos / 1e6 / gpuDrawCount, 4),
                 format(gpuDrawMaxNanos / 1e6, 4),
@@ -4060,8 +4065,7 @@ public final class FrameProfiler {
                 kinds.append(' ');
             kinds.append(MAT_KINDS[i]).append('=').append(format(matByKind[i] / (double) frames, 0));
         }
-        VulkanMod.LOGGER.info(
-                "[VKPROF] matByKind {} | xfFused={} xfMiss={} xfRead={} xfMis={} xfDiff={} xfStale={}",
+        VKProf.info("[VKPROF] matByKind {} | xfFused={} xfMiss={} xfRead={} xfMis={} xfDiff={} xfStale={}",
                 kinds, format(chunkXfFused / (double) frames, 0), format(chunkXfCacheMiss / (double) frames, 0),
                 format(chunkXfStackRead / (double) frames, 0),
                 format(chunkXfMismatch / (double) frames, 0), String.format("%.2e", chunkXfMaxDiff),
@@ -4069,8 +4073,7 @@ public final class FrameProfiler {
 
         // Texture uploads, on their own line for the same reason: the main
         // report is parsed positionally by the A/B harnesses.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] texUp n={} kB={} ms={} swzN={} swzKB={} swzMs={} maxUs={} stgMs={} barMs={} cpMs={} "
+        VKProf.info("[VKPROF] texUp n={} kB={} ms={} swzN={} swzKB={} swzMs={} maxUs={} stgMs={} barMs={} cpMs={} "
                         + "cpSetupMs={} cpCmdMs={}",
                 format(texUploads / (double) frames, 1),
                 format(texUploadBytes / 1024.0 / frames, 1),
@@ -4087,8 +4090,7 @@ public final class FrameProfiler {
 
         // Rejection split for the apply-reuse guard, plus the count of reuses the
         // generalised gate unlocked.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] rej serial={} epoch={} bind={} uniform={} boundPipe={} state={} nonBlock={}",
+        VKProf.info("[VKPROF] rej serial={} epoch={} bind={} uniform={} boundPipe={} state={} nonBlock={}",
                 format(reuseRejects[REJ_SERIAL] / (double) frames, 0),
                 format(reuseRejects[REJ_EPOCH] / (double) frames, 0),
                 format(reuseRejects[REJ_BIND] / (double) frames, 0),
@@ -4104,8 +4106,7 @@ public final class FrameProfiler {
         final long applyCalls = applyFastCalls + applyFullCalls;
         final double applySplitMiscMs = (shaderApplyNanos - mvpRecalcNanos - reuseGuardNanos - aPushNanos - aBookNanos)
                                         / 1e6 / frames;
-        VulkanMod.LOGGER.info(
-                "[VKPROF] applysplit calls={} pushMs={} bookMs={} miscMs={} qIndMs={} qIndN={} preMs={} preN={} "
+        VKProf.info("[VKPROF] applysplit calls={} pushMs={} bookMs={} miscMs={} qIndMs={} qIndN={} preMs={} preN={} "
                         + "psHit={} psDerive={} ns/apply={} ns/mat={} ns/guard={}",
                 format(applyCalls / (double) frames, 0),
                 format(aPushNanos / 1e6 / frames, 3),
@@ -4125,19 +4126,17 @@ public final class FrameProfiler {
         // applysplit field list the harnesses read by name is untouched.
         // `psMemo` must track `psHit + psDerive`; `psBad` is verify-mode only and
         // must be 0.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] psmemo psMemo={} psBad={} psHit={} psDerive={}",
+        VKProf.info("[VKPROF] psmemo psMemo={} psBad={} psHit={} psDerive={}",
                 format(psMemoHits / (double) frames, 0),
                 format(psMemoMismatches / (double) frames, 0),
                 format(psHits / (double) frames, 0),
                 format(psDerives / (double) frames, 0));
 
-        // Paired within-frame A/B of the memo (VULKANMOD_MEMOAB=1). `nsA` is the
+        // Paired within-frame A/B of the memo (MEMOAB=1). `nsA` is the
         // memo arm, `nsB` the full-encode arm; both are per-call means over the
         // same frames, so `dNs` is the memo's cost delta with the scene cancelled.
         // Meaningless unless MEMO_AB is on - armA/armB are then 0.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] memoab armA={} nsA={} armB={} nsB={} dNs={}",
+        VKProf.info("[VKPROF] memoab armA={} nsA={} armB={} nsB={} dNs={}",
                 format(abMemoCalls / (double) frames, 0),
                 format(abMemoCalls > 0 ? abMemoNanos / (double) abMemoCalls : 0, 0),
                 format(abPlainCalls / (double) frames, 0),
@@ -4147,8 +4146,7 @@ public final class FrameProfiler {
 
         // Reuse path vs full path, per call. The two have opposite fixes, so the
         // per-call figures matter more than the per-frame totals.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] applypath fastN={} fastNs={} fullN={} fullNs={} fastMs={} fullMs={}",
+        VKProf.info("[VKPROF] applypath fastN={} fastNs={} fullN={} fullNs={} fastMs={} fullMs={}",
                 format(applyFastCalls / (double) frames, 0),
                 format(applyFastCalls > 0 ? applyFastNanos / (double) applyFastCalls : 0, 0),
                 format(applyFullCalls / (double) frames, 0),
@@ -4160,8 +4158,7 @@ public final class FrameProfiler {
         // cost that `miscMs` has been absorbing. `flushMs` minus the main line's
         // `mvpMs` is the entry cost of apply -> flushMVP -> calculateMVP plus the
         // interface dispatch into the section-MVP provider.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] fullsplit n={} samplersMs={} useProgramMs={} bindMs={} publishMs={} otherMs={} "
+        VKProf.info("[VKPROF] fullsplit n={} samplersMs={} useProgramMs={} bindMs={} publishMs={} otherMs={} "
                         + "flushMs={} flushNs={} bindGfxMs={} bindTexMs={} bindUboMs={} "
                         + "pushMs={} descMs={} descUpdMs={} descBindMs={}",
                 format(applyFullCalls / (double) frames, 0),
@@ -4184,9 +4181,8 @@ public final class FrameProfiler {
         // Paired within-frame A/B (pass 11). armOn is the arm on which the flag
         // behaves as it does by default; both per-call means are taken over the
         // SAME frames, so dNs has the scene cancelled out. All zero unless
-        // VULKANMOD_AB names a flag.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] pab flag={} armOn={} nsOn={} armOff={} nsOff={} dNs={} "
+        // AB names a flag.
+        VKProf.info("[VKPROF] pab flag={} armOn={} nsOn={} armOff={} nsOff={} dNs={} "
                         + "matOn={} nsMatOn={} matOff={} nsMatOff={} dMatNs={} "
                         + "bfsOn={} nsBfsOn={} bfsOff={} nsBfsOff={} dBfsNs={} "
                         + "frOn={} nsFrOn={} frOff={} nsFrOff={} dFrNs={} "
@@ -4277,8 +4273,7 @@ public final class FrameProfiler {
         // number the rewrite has to beat. `fastN` is how many probes took the
         // arithmetic path and `bad` is the verify-mode disagreement count
         // (must be 0).
-        VulkanMod.LOGGER.info(
-                "[VKPROF] bfs ms={} probes={} fastN={} bad={}",
+        VKProf.info("[VKPROF] bfs ms={} probes={} fastN={} bad={}",
                 format(bfsNanos / 1e6 / frames, 3),
                 format(bfsProbes / (double) frames, 2),
                 format(bfsFastCalls / (double) frames, 2),
@@ -4293,8 +4288,7 @@ public final class FrameProfiler {
         // and `sfTrue` are expected to be equal, and a disagreement between
         // them means the loop's short-circuit order is not what the reading
         // assumes.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] bfsbody polls={} sfN={} sfTrue={} frN={} viN={} oppN={} "
+        VKProf.info("[VKPROF] bfsbody polls={} sfN={} sfTrue={} frN={} viN={} oppN={} "
                         + "pNs={} sfNs={} frNs={} viNs={} s={}/{}/{}/{} frBad={}",
                 format(bfsPolls / (double) frames, 2),
                 format(bfsSetFrameCalls / (double) frames, 2),
@@ -4316,8 +4310,7 @@ public final class FrameProfiler {
         // multiplies against. `bad` is the verify-mode disagreement count and must
         // be 0; a non-zero value means the mask removed a facing term 1 would have
         // kept, which is holes in the world.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] bfsmask polls={} masked={} skipN={} bad={}",
+        VKProf.info("[VKPROF] bfsmask polls={} masked={} skipN={} bad={}",
                 format(bfsPolls / (double) frames, 2),
                 format(bfsMaskPolls / (double) frames, 2),
                 format(bfsMaskSkipped / (double) frames, 2),
@@ -4342,8 +4335,7 @@ public final class FrameProfiler {
         //               setAllVisible(true) branch for solid sections.
         // `bad` is the BFS_ROW_VERIFY disagreement count and must be 0; a non-zero
         // value means the mirror is stale and chunks are missing from the world.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] bfsrow on={} v={} calls={} row={} loop={} vis={} allVis={} bits={} bad={}",
+        VKProf.info("[VKPROF] bfsrow on={} v={} calls={} row={} loop={} vis={} allVis={} bits={} bad={}",
                 BFS_ROW_ON,
                 BFS_ROW_VERIFY_ON,
                 format(bfsRowCalls / (double) frames, 1),
@@ -4370,8 +4362,7 @@ public final class FrameProfiler {
         // could be; must be 0.00, or a stamp was missed and the split is fiction.
         final double s = bfsPhaseSamples / (double) frames;
         final double tot = bfsPhasePollNs + bfsPhasePrologueNs + bfsPhaseLoopNs;
-        VulkanMod.LOGGER.info(
-                "[VKPROF] bfsphase on={} s={} q={} pro={} loop={} sum={} qPct={} proPct={} bad={}",
+        VKProf.info("[VKPROF] bfsphase on={} s={} q={} pro={} loop={} sum={} qPct={} proPct={} bad={}",
                 BFS_PHASE_ON,
                 format(s, 1),
                 format(bfsPhaseSamples == 0 ? 0.0 : bfsPhasePollNs / (double) bfsPhaseSamples, 1),
@@ -4388,8 +4379,7 @@ public final class FrameProfiler {
         // 0 decimals a call rate of 0.4/frame printed as "0", which reads as
         // "never called" and sent the first reading of this line down the wrong
         // branch entirely. bfs is the number of entries into the update block.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] tsetup calls={} ms={} bfs={} vfCalls={} vfMs={} vfHit={} vfBad={} "
+        VKProf.info("[VKPROF] tsetup calls={} ms={} bfs={} vfCalls={} vfMs={} vfHit={} vfBad={} "
                         + "vfMemo={} vfMemoBad={} ri={}/{}",
                 format(setupTerrainCalls / (double) frames, 2),
                 format(setupTerrainNanos / 1e6 / frames, 3),
@@ -4429,8 +4419,7 @@ public final class FrameProfiler {
         // classifier). A run where `short=0` and `ecalls=0` is "not wired"; a run
         // where `short=0` and `ecalls=1784` is "wired and skipping nothing".
         final double pass0Calls = entPass0Calls > 0 ? entPass0Calls : 1;
-        VulkanMod.LOGGER.info(
-                "[VKPROF] ent ms={} ents={} blocke={} calls={} head={} wpass={} total={} rendered={} "
+        VKProf.info("[VKPROF] ent ms={} ents={} blocke={} calls={} head={} wpass={} total={} rendered={} "
                         + "| fempty calls={} scanned={} added={} ms={} ns/scan={} | vtx={} "
                         + "| iter={} ns/iter={} outline={} "
                         + "| p1 short={} probes={} miss={} extra={} bad={} "
@@ -4481,8 +4470,7 @@ public final class FrameProfiler {
         // a render that costs nothing. `open` counts the frames in which at least one
         // render was timed, so a run where the flag never went up is distinguishable
         // from a run where it went up and the renders were cheap.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] entattr loop={} render={} walk={} n={} rendered={} ns/render={} open={}",
+        VKProf.info("[VKPROF] entattr loop={} render={} walk={} n={} rendered={} ns/render={} open={}",
                 format(entP0LoopNanos / 1e6 / frames, 4),
                 format(entRenderNanos / 1e6 / frames, 4),
                 format((entP0LoopNanos - entRenderNanos) / 1e6 / frames, 4),
@@ -4500,8 +4488,7 @@ public final class FrameProfiler {
         // and `ns/sh` are per-call means over the same window, so they carry the
         // scene with them and are the only figures here worth comparing across
         // passes.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] entsplit pre={} do={} dl={} oth={} sh={} n={} doN={} dlN={} shN={} ns/do={} ns/sh={}",
+        VKProf.info("[VKPROF] entsplit pre={} do={} dl={} oth={} sh={} n={} doN={} dlN={} shN={} ns/do={} ns/sh={}",
                 format((entRenderNanos - entDoNanos - entShNanos) / 1e6 / frames, 4),
                 format(entDoNanos / 1e6 / frames, 4),
                 format(entDlNanos / 1e6 / frames, 4),
@@ -4526,8 +4513,7 @@ public final class FrameProfiler {
         //
         // `mat` is the shim's own matrix path and reads 0.0000 when `dt=0` - which
         // means "not measured", not "free"; see the field block above.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] entsplit2 mdl={} oth2={} mat={} n={} mdlN={} matN={} dt={}",
+        VKProf.info("[VKPROF] entsplit2 mdl={} oth2={} mat={} n={} mdlN={} matN={} dt={}",
                 format(entMdlNanos / 1e6 / frames, 4),
                 format((entDoNanos - entMdlNanos) / 1e6 / frames, 4),
                 format(entMatNanos / 1e6 / frames, 4),
@@ -4547,8 +4533,7 @@ public final class FrameProfiler {
         // for the gate to be worth anything. `skipped` is iterations answered from
         // the index (in verify mode, "would have been"); the attach check is that it
         // tracks `iter`/2 rather than reading 0, and that `miss` is 0.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] entidx on={} v={} builds={} marks={} skipped={} checked={} "
+        VKProf.info("[VKPROF] entidx on={} v={} builds={} marks={} skipped={} checked={} "
                         + "miss={} extra={} dummy={}",
                 format(ENT_IDX ? 1 : 0, 0),
                 format(ENT_IDX_VERIFY ? 1 : 0, 0),
@@ -4599,8 +4584,7 @@ public final class FrameProfiler {
         // A run with `gets=0` is inert, not clean; a run with `hits=0` has a record
         // that is built and never read. `hits` counts the ON arm only - it is NOT
         // the 3 x ri of post-build scans, because the OFF arm's share is in `off`.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] flmask on={} v={} gets={} isl={} chunks={} builds={} hits={} off={} "
+        VKProf.info("[VKPROF] flmask on={} v={} gets={} isl={} chunks={} builds={} hits={} off={} "
                         + "offT={} idxBad={} max={} bad={} bchk={} bbad={} bchunks={} bskip={} "
                         + "tbuild={} bloops={} bnon={} chk={}",
                 format(FLMASK ? 1 : 0, 0),
@@ -4639,8 +4623,7 @@ public final class FrameProfiler {
         //   `chk`/`miss`/`extra` are verify-only; `miss` must be 0
         // A run with `built=0` is inert, not clean; a run with `count=0` is a record
         // that is built and never used.
-        VulkanMod.LOGGER.info(
-                "[VKPROF] tileidx on={} v={} built={} loops={} count={} visited={} bad={} "
+        VKProf.info("[VKPROF] tileidx on={} v={} built={} loops={} count={} visited={} bad={} "
                         + "chk={} miss={} extra={}",
                 format(TILE_IDX ? 1 : 0, 0),
                 format(TILE_IDX_VERIFY ? 1 : 0, 0),

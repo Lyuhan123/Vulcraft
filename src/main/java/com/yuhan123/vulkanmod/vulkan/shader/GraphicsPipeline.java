@@ -1,5 +1,7 @@
 package com.yuhan123.vulkanmod.vulkan.shader;
 
+import com.yuhan123.vulkanmod.VKProf;
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import net.minecraft.client.renderer.vertex.VertexFormat;
 import net.minecraft.client.renderer.vertex.VertexFormatElement;
 import it.unimi.dsi.fastutil.objects.Object2LongMap;
@@ -40,16 +42,16 @@ public class GraphicsPipeline extends Pipeline {
 
     /**
      * early_fragment_tests variant (discard retained). Selected for the cutout
-     * single-pass draw when VULKANMOD_EARLYCUTOUT=1 is set (diagnostic only):
+     * single-pass draw when EARLYCUTOUT=1 is set (diagnostic only):
      * re-attaches early tests but reintroduces the sky punch-through defect.
      */
     private long fragShaderModuleEarlyTest = 0;
 
-    /** TEMPORARY: winding experiment - VULKANMOD_NOCULL=1 disables back-face culling everywhere. */
-    private static final boolean NOCULL = System.getenv("VULKANMOD_NOCULL") != null;
+    /** TEMPORARY: winding experiment - NOCULL=1 disables back-face culling everywhere. */
+    private static final boolean NOCULL = VulkanModConfig.getBool("NOCULL", false);
 
-    /** TEMPORARY: A/B arm for the depth-bias fix - VULKANMOD_DEPTHBIAS=1 restores the old value. */
-    private static final boolean DEPTHBIAS = System.getenv("VULKANMOD_DEPTHBIAS") != null;
+    /** TEMPORARY: A/B arm for the depth-bias fix - DEPTHBIAS=1 restores the old value. */
+    private static final boolean DEPTHBIAS = VulkanModConfig.getBool("DEPTHBIAS", false);
 
     GraphicsPipeline(Builder builder) {
         super(builder.shaderPath);
@@ -100,8 +102,7 @@ public class GraphicsPipeline extends Pipeline {
 
     private long createGraphicsPipeline(PipelineState state) {
         long picked = pickFragModule(state);
-        VulkanMod.LOGGER.info(
-                "[VKPROF] create pipeline '{}': cMask=0x{} aTest={} dMask={} dEqual={} frag={} (early=0x{} noDiscard=0x{} normal=0x{})",
+        VKProf.info("[VKPROF] create pipeline '{}': cMask=0x{} aTest={} dMask={} dEqual={} frag={} (early=0x{} noDiscard=0x{} normal=0x{})",
                 this.name, Integer.toHexString(state.colorMask_i), state.alphaTest(), state.depthMask(),
                 state.depthEqual(),
                 picked == fragShaderModuleEarlyTest && fragShaderModuleEarlyTest != 0 ? "EARLY"
@@ -167,7 +168,7 @@ public class GraphicsPipeline extends Pipeline {
                 cullMode = VK_CULL_MODE_NONE;
             }
 
-            // TEMPORARY winding experiment: VULKANMOD_NOCULL=1 disables back-face
+            // TEMPORARY winding experiment: NOCULL=1 disables back-face
             // culling for EVERY pipeline. If the foliage stipple and the shattered
             // entities disappear, the defect is winding/culling; if they survive,
             // it is not.
@@ -209,7 +210,7 @@ public class GraphicsPipeline extends Pipeline {
             // 1.12.2 only enables it for a few cases (glPolygonOffset for
             // overlays/shadowing). Nothing in the port maps GL polygon offset
             // into this struct, so the correct value is simply bias OFF.
-            // VULKANMOD_DEPTHBIAS=1 restores the old unconditional enable for
+            // DEPTHBIAS=1 restores the old unconditional enable for
             // back-to-back A/B.
             rasterizer.depthBiasEnable(DEPTHBIAS);
             rasterizer.depthBiasConstantFactor(0.0f);
@@ -326,7 +327,7 @@ public class GraphicsPipeline extends Pipeline {
 
         if (fragNoDiscardSpirv != null) {
             this.fragShaderModuleNoDiscard = createShaderModule(fragNoDiscardSpirv.bytecode());
-            VulkanMod.LOGGER.info("[VKPROF] early-Z fragment variant created for shader '{}'", this.name);
+            VKProf.info("[VKPROF] early-Z fragment variant created for shader '{}'", this.name);
         }
 
         if (fragEarlyTestSpirv != null) {
@@ -341,8 +342,8 @@ public class GraphicsPipeline extends Pipeline {
      *    deliberately. early_fragment_tests would write depth for fragments the
      *    shader goes on to discard, punching the cutout mask into a per-texel
      *    stipple with sky bleeding through. The variant is only reachable as a
-     *    diagnostic via VULKANMOD_EARLYCUTOUT=1 (see branch 2 below).
-     * 2. alpha test on + depthMask ON + VULKANMOD_EARLYCUTOUT=1 (diagnostic only)
+     *    diagnostic via EARLYCUTOUT=1 (see branch 2 below).
+     * 2. alpha test on + depthMask ON + EARLYCUTOUT=1 (diagnostic only)
      *    -> the early_fragment_tests variant; reintroduces the sky punch-through
      *    defect but confirms whether cutout overdraw is the GPU bottleneck.
      * 3. alpha test off (vanilla disables it for the SOLID layer) -> the
@@ -350,7 +351,7 @@ public class GraphicsPipeline extends Pipeline {
      *    otherwise be dead code that still forces late fragment tests.
      * 4. anything else -> the full original shader.
      *
-     * The two-pass VULKANMOD_PREPASS depth prepass was removed; the depth-only
+     * The two-pass PREPASS depth prepass was removed; the depth-only
      * fragment module and the prepass colour-pass branch are gone. See git
      * history (backup commit b428c9a) for the removed code.
      */
@@ -368,10 +369,10 @@ public class GraphicsPipeline extends Pipeline {
         // Measured on the leaf canopy (854x480 bench, fixed camera, 12600-pixel
         // box): 28.7% sky punch-through with the variant, 11.3% without - the
         // variant accounted for 61% of the defect. The variant is only reachable
-        // as a diagnostic via VULKANMOD_EARLYCUTOUT=1 (branch 2 below).
+        // as a diagnostic via EARLYCUTOUT=1 (branch 2 below).
         if (this.fragShaderModuleEarlyTest != 0
                 && state.alphaTest() && state.depthMask()
-                && System.getenv("VULKANMOD_EARLYCUTOUT") != null) {
+                && VulkanModConfig.getBool("EARLYCUTOUT", false)) {
             return this.fragShaderModuleEarlyTest;
         }
 

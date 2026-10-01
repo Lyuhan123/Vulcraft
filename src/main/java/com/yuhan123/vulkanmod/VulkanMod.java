@@ -1,7 +1,7 @@
 package com.yuhan123.vulkanmod;
 
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.proxy.IProxy;
-import net.minecraft.client.Minecraft;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.SidedProxy;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
@@ -22,12 +22,12 @@ public class VulkanMod {
      */
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
-        LOGGER.info("Hello From {}!", Reference.MOD_NAME);
-        LOGGER.info("Proxy is {}", proxy);
-        LOGGER.info("Language: {}", Minecraft.getMinecraft().getLanguageManager().getCurrentLanguage());
-
-        // TEMPORARY test-only auto-join hook (see com.yuhan123.vulkanmod.test.AutoJoinTest)
-
+        // Switches now come from config/vulkanmod.properties. Load it before any
+        // other class reads one, so the static flags pick up the file values.
+        VulkanModConfig.load(event.getModConfigurationDirectory());
+        LOGGER.info("{} {} starting; switches from {} (profiling={})",
+                Reference.MOD_NAME, Reference.VERSION,
+                VulkanModConfig.file(), Boolean.valueOf(VulkanModConfig.profiling()));
     }
 
 }

@@ -1,5 +1,7 @@
 package com.yuhan123.vulkanmod.vulkan;
 
+import com.yuhan123.vulkanmod.VKProf;
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import net.minecraft.client.Minecraft;
 import com.yuhan123.vulkanmod.vulkan.device.DeviceManager;
 import com.yuhan123.vulkanmod.vulkan.shader.PipelineState;
@@ -233,8 +235,7 @@ public abstract class VRenderSystem {
     public static void logGuiSetLm(float u, float v) {
         if (guiSetLmLogs < 16) {
             ++guiSetLmLogs;
-            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(String.format(
-                    "[VKPROF] SETLM (%.1f,%.1f)", u, v));
+            com.yuhan123.vulkanmod.VKProf.info(String.format("[VKPROF] SETLM (%.1f,%.1f)", u, v));
         }
     }
 
@@ -288,7 +289,7 @@ public abstract class VRenderSystem {
                 s.append(" <- ").append(st[i].getClassName(), st[i].getClassName().lastIndexOf('.') + 1,
                         st[i].getClassName().length()).append('.').append(st[i].getMethodName());
             }
-            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(s.toString());
+            com.yuhan123.vulkanmod.VKProf.info(s.toString());
         }
     }
 
@@ -511,16 +512,16 @@ public abstract class VRenderSystem {
                 matrixSource.applyCurrentMatrices();
             }
         }
-        // else: VULKANMOD_DLPULL=0 restores the lazy read, for A/B runs only.
+        // else: DLPULL=0 restores the lazy read, for A/B runs only.
         MODEL_VIEW_FB.clear();
         return MODEL_VIEW_FB;
     }
 
-    /** {@code VULKANMOD_DLPULL=0} restores the lazy read, for A/B runs only. */
-    private static final boolean PULL_ON_REPLAY = !"0".equals(System.getenv("VULKANMOD_DLPULL"));
+    /** {@code DLPULL=0} restores the lazy read, for A/B runs only. */
+    private static final boolean PULL_ON_REPLAY = VulkanModConfig.getBool("DLPULL", true);
 
     /**
-     * Always false: the deferred chunk transform (VULKANMOD_CHUNKXF) was
+     * Always false: the deferred chunk transform (CHUNKXF) was
      * removed and the matrix stack is always real, so there is never anything
      * pending to materialise. Kept for {@code ShaderInstance.apply}, whose
      * reuse guard consumes the return value.

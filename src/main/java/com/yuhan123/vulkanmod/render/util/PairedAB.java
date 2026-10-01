@@ -1,7 +1,8 @@
 package com.yuhan123.vulkanmod.render.util;
 
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 /**
- * Paired within-frame A/B for any boolean-gated hot path: {@code VULKANMOD_AB=<FLAG>}.
+ * Paired within-frame A/B for any boolean-gated hot path: {@code AB=<FLAG>}.
  *
  * <h2>Why this exists</h2>
  *
@@ -21,7 +22,7 @@ package com.yuhan123.vulkanmod.render.util;
  *
  * <h2>How to use it</h2>
  *
- * A run names exactly one flag, e.g. {@code VULKANMOD_AB=APPLYREUSE}. The flag's
+ * A run names exactly one flag, e.g. {@code AB=APPLYREUSE}. The flag's
  * holder turns its {@code static final boolean} into a method:
  *
  * <pre>{@code
@@ -53,8 +54,8 @@ package com.yuhan123.vulkanmod.render.util;
  */
 public final class PairedAB {
 
-    /** The flag named by {@code VULKANMOD_AB}, or null when the instrument is off. */
-    public static final String FLAG = System.getenv("VULKANMOD_AB");
+    /** The flag named by {@code AB}, or null when the instrument is off. */
+    public static final String FLAG = VulkanModConfig.get("AB");
 
     public static final boolean ACTIVE = FLAG != null && !FLAG.isEmpty();
 
@@ -80,7 +81,7 @@ public final class PairedAB {
      * if the residual is mostly apparatus then the shim's real per-draw cost is far
      * below its measured cost, and the ceiling on further shim work is much lower
      * than the measured rows imply. Nothing about a production build changes - the
-     * apparatus is already behind {@code VULKANMOD_DRAWTIMING}.
+     * apparatus is already behind {@code DRAWTIMING}.
      */
     public static final boolean TARGET_APPTIME = targets("APPTIME");
 
@@ -214,7 +215,7 @@ public final class PairedAB {
      * arms differ by exactly the term-2 predicate.
      *
      * <p>That makes the arm's own attach check available and cheap: with
-     * {@code VULKANMOD_BFS_T2=0} both arms compute the term-1 mask, so the row
+     * {@code BFS_T2=0} both arms compute the term-1 mask, so the row
      * <b>must</b> read ~0. A non-zero {@code dMkNs} in that configuration means the
      * arm is not gating what it claims to.
      *
@@ -364,7 +365,7 @@ public final class PairedAB {
      * Arm ON answers from a per-frame record built during the frame's first
      * filterempty scan; arm OFF dereferences the real {@code CompiledChunk} at
      * every call, which is what production did before this pass and what the kill
-     * switch {@code VULKANMOD_FLTMASK=0} restores. The OFF arm is therefore the
+     * switch {@code FLTMASK=0} restores. The OFF arm is therefore the
      * production reference, not a transcription of it.
      *
      * <h3>Two rows, two units, two sample points</h3>
@@ -401,7 +402,7 @@ public final class PairedAB {
      * Arm ON hands pass 1's tile for-each a {@code CompactIterator} over the
      * indices pass 0 recorded as having tile entities; arm OFF hands it
      * {@code renderInfos.iterator()} unchanged, which is exactly what production
-     * does with {@code VULKANMOD_TILEIDX=0}. The entries visited, their order and
+     * does with {@code TILEIDX=0}. The entries visited, their order and
      * their bodies are identical in both arms — the removed iterations are the
      * ones whose entire body was {@code if (!list3.isEmpty())} and nothing else.
      *

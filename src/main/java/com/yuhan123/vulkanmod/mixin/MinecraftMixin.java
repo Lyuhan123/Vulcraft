@@ -1,5 +1,7 @@
 package com.yuhan123.vulkanmod.mixin;
 
+import com.yuhan123.vulkanmod.VKProf;
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.VulkanMod;
 import com.yuhan123.vulkanmod.gl.VkGlFramebuffer;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
@@ -35,8 +37,8 @@ import static org.lwjgl.vulkan.VK10.vkDestroyInstance;
 @Mixin(Minecraft.class)
 public class MinecraftMixin {
     /**
-     * Headless-bench hooks: set VULKANMOD_AUTOJOIN=1 to load the "New World"
-     * save from the main menu and VULKANMOD_AUTOQUIT=1 to exit 30s after the
+     * Headless-bench hooks: set AUTOJOIN=1 to load the "New World"
+     * save from the main menu and AUTOQUIT=1 to exit 30s after the
      * integrated server is up. Both are no-ops unless the env vars are set,
      * so normal gameplay is unaffected.
      */
@@ -45,7 +47,7 @@ public class MinecraftMixin {
     @Unique private static boolean autoTeleported = false;
     @Unique private static boolean sceneFrozen = false;
     @Unique private static boolean profileWindowStarted = false;
-    @Unique private static final boolean BENCH_MODE = "1".equals(System.getenv("VULKANMOD_AUTOJOIN"));
+    @Unique private static final boolean BENCH_MODE = VulkanModConfig.getBool("AUTOJOIN", false);
 
     /**
      * How long after the bench window opens the profiler's accumulators are
@@ -68,14 +70,14 @@ public class MinecraftMixin {
      * and {@code clearProfiling()} resets exactly the accumulators
      * {@code getProfilingData} reads.
      *
-     * <p>{@code VULKANMOD_PROFILE_WARMUP} sets it in seconds (default 10). A
+     * <p>{@code PROFILE_WARMUP} sets it in seconds (default 10). A
      * value at or above the bench window leaves the old run-average behaviour.
      */
     @Unique private static final long PROFILE_WARMUP_MILLIS = vulkanmod$profileWarmupMillis();
 
     @Unique
     private static long vulkanmod$profileWarmupMillis() {
-        String seconds = System.getenv("VULKANMOD_PROFILE_WARMUP");
+        String seconds = VulkanModConfig.get("PROFILE_WARMUP");
         if (seconds == null) {
             return 10_000L;
         }
@@ -101,8 +103,8 @@ public class MinecraftMixin {
      * compaction under test would have iterated <b>zero</b> entries. A correctness
      * gate cannot test a branch the scene never reaches, and the failure mode of
      * getting that branch wrong (a tile entity silently not drawn) is invisible to
-     * every harness in this repo. {@code VULKANMOD_BENCH_POS="x,y,z"} plus
-     * {@code VULKANMOD_BENCH_YAW}/{@code VULKANMOD_BENCH_PITCH} aim the camera at a
+     * every harness in this repo. {@code BENCH_POS="x,y,z"} plus
+     * {@code BENCH_YAW}/{@code BENCH_PITCH} aim the camera at a
      * scene that does contain tile entities, which turns that branch from untested
      * into tested.
      *
@@ -113,7 +115,7 @@ public class MinecraftMixin {
     private static double[] vulkanmod$benchViewpoint(double dx, double dy, double dz,
                                                      double dyaw, double dpitch) {
         double x = dx, y = dy, z = dz, yaw = dyaw, pitch = dpitch;
-        final String pos = System.getenv("VULKANMOD_BENCH_POS");
+        final String pos = VulkanModConfig.get("BENCH_POS");
         if (pos != null) {
             final String[] parts = pos.split(",");
             if (parts.length == 3) {
@@ -122,10 +124,10 @@ public class MinecraftMixin {
                     y = Double.parseDouble(parts[1].trim());
                     z = Double.parseDouble(parts[2].trim());
                 } catch (NumberFormatException e) {
-                    VulkanMod.LOGGER.warn("[VKPROF] VULKANMOD_BENCH_POS unparseable: {}", pos);
+                    VKProf.warn("[VKPROF] VULKANMOD_BENCH_POS unparseable: {}", pos);
                 }
             } else {
-                VulkanMod.LOGGER.warn("[VKPROF] VULKANMOD_BENCH_POS wants x,y,z - got {}", pos);
+                VKProf.warn("[VKPROF] VULKANMOD_BENCH_POS wants x,y,z - got {}", pos);
             }
         }
         yaw = vulkanmod$benchAngle("VULKANMOD_BENCH_YAW", yaw);
@@ -135,20 +137,20 @@ public class MinecraftMixin {
 
     @Unique
     private static double vulkanmod$benchAngle(String key, double fallback) {
-        final String v = System.getenv(key);
+        final String v = VulkanModConfig.get(key);
         if (v == null) {
             return fallback;
         }
         try {
             return Double.parseDouble(v.trim());
         } catch (NumberFormatException e) {
-            VulkanMod.LOGGER.warn("[VKPROF] {} unparseable: {}", key, v);
+            VKProf.warn("[VKPROF] {} unparseable: {}", key, v);
             return fallback;
         }
     }
 
     /**
-     * Bench-only scene injection: {@code VULKANMOD_BENCH_CHEST="x,y,z[;x,y,z]"}.
+     * Bench-only scene injection: {@code BENCH_CHEST="x,y,z[;x,y,z]"}.
      *
      * <p>Why it exists (pass 21). The tile-entity loop's non-empty branch could
      * not be reached on this bench. The save holds 21 chunks with tile entities -
@@ -171,7 +173,7 @@ public class MinecraftMixin {
     private static boolean benchChestPlaced = false;
 
     /**
-     * Bench-only probe block wall: {@code VULKANMOD_BENCH_BLOCK="<blockId>:<dz>"}.
+     * Bench-only probe block wall: {@code BENCH_BLOCK="<blockId>:<dz>"}.
      *
      * <p>Fills a solid wall one layer thick at {@code z = floor(pz) + dz},
      * spanning {@code x = px +/- 6} and {@code y = feet-2 .. feet+5}, with the
@@ -189,7 +191,7 @@ public class MinecraftMixin {
      */
     @Unique
     private static void vulkanmod$injectBenchBlockWall(Minecraft mc) {
-        final String spec = System.getenv("VULKANMOD_BENCH_BLOCK");
+        final String spec = VulkanModConfig.get("BENCH_BLOCK");
         if (spec == null || mc.player == null || mc.getIntegratedServer() == null) {
             return;
         }
@@ -205,7 +207,7 @@ public class MinecraftMixin {
             final String entry = one.trim();
             final int lastColon = entry.lastIndexOf(':');
             if (lastColon < 0) {
-                VulkanMod.LOGGER.warn("[VKPROF] VULKANMOD_BENCH_BLOCK wants <blockId>:<dz> - got {}", entry);
+                VKProf.warn("[VKPROF] VULKANMOD_BENCH_BLOCK wants <blockId>:<dz> - got {}", entry);
                 continue;
             }
             final String blockId = entry.substring(0, lastColon);
@@ -213,7 +215,7 @@ public class MinecraftMixin {
             try {
                 dz = Integer.parseInt(entry.substring(lastColon + 1).trim());
             } catch (NumberFormatException e) {
-                VulkanMod.LOGGER.warn("[VKPROF] VULKANMOD_BENCH_BLOCK dz unparseable: {}", entry);
+                VKProf.warn("[VKPROF] VULKANMOD_BENCH_BLOCK dz unparseable: {}", entry);
                 continue;
             }
             final String command = String.format(java.util.Locale.ROOT,
@@ -221,9 +223,9 @@ public class MinecraftMixin {
             server.addScheduledTask(() -> {
                 try {
                     server.getCommandManager().executeCommand(server, command);
-                    VulkanMod.LOGGER.info("[VKPROF] bench block wall: {}", command);
+                    VKProf.info("[VKPROF] bench block wall: {}", command);
                 } catch (Throwable t) {
-                    VulkanMod.LOGGER.warn("[VKPROF] bench block wall failed: {}", command, t);
+                    VKProf.warn("[VKPROF] bench block wall failed: {}", command, t);
                 }
             });
         }
@@ -233,7 +235,7 @@ public class MinecraftMixin {
     private static void vulkanmod$injectBenchScene(Minecraft mc) {
         vulkanmod$injectBenchBlockWall(mc);
 
-        final String spec = System.getenv("VULKANMOD_BENCH_CHEST");
+        final String spec = VulkanModConfig.get("BENCH_CHEST");
         if (spec == null || mc.getIntegratedServer() == null) {
             return;
         }
@@ -241,7 +243,7 @@ public class MinecraftMixin {
         for (String one : spec.split(";")) {
             final String[] xyz = one.trim().split(",");
             if (xyz.length != 3) {
-                VulkanMod.LOGGER.warn("[VKPROF] VULKANMOD_BENCH_CHEST wants x,y,z - got {}", one);
+                VKProf.warn("[VKPROF] VULKANMOD_BENCH_CHEST wants x,y,z - got {}", one);
                 continue;
             }
             final String command = "setblock " + xyz[0].trim() + " " + xyz[1].trim()
@@ -249,16 +251,16 @@ public class MinecraftMixin {
             server.addScheduledTask(() -> {
                 try {
                     server.getCommandManager().executeCommand(server, command);
-                    VulkanMod.LOGGER.info("[VKPROF] bench scene injection: {}", command);
+                    VKProf.info("[VKPROF] bench scene injection: {}", command);
                 } catch (Throwable t) {
-                    VulkanMod.LOGGER.warn("[VKPROF] bench scene injection failed: {}", command, t);
+                    VKProf.warn("[VKPROF] bench scene injection failed: {}", command, t);
                 }
             });
         }
     }
 
     /**
-     * VULKANMOD_FREEZE=1 (bench mode only) pins the world into a deterministic
+     * FREEZE=1 (bench mode only) pins the world into a deterministic
      * state right after the teleport, so an A/B compares the same scene instead
      * of two samples of a drifting one.
      *
@@ -277,7 +279,7 @@ public class MinecraftMixin {
      * <p>Two entity modes, because they are the right bench for different
      * changes:
      * <ul>
-     *   <li><b>{@code VULKANMOD_FREEZE=1} (default)</b> clears the world's
+     *   <li><b>{@code FREEZE=1} (default)</b> clears the world's
      *       entities and summons a fixed set of mobs at fixed coordinates with
      *       {@code NoAI/NoGravity/Invulnerable/PersistenceRequired}. The
      *       display-list load that entity drawing represents is
@@ -286,12 +288,12 @@ public class MinecraftMixin {
      *       so {@code dlReplay} goes constant. Clearing first matters: the
      *       natural mobs wander, so their count in view is whatever the save
      *       happened to hold.</li>
-     *   <li><b>{@code VULKANMOD_FREEZE=kill}</b> only kills, and summons
+     *   <li><b>{@code FREEZE=kill}</b> only kills, and summons
      *       nothing. A smaller, even more stable scene - but it deletes the
      *       entity draw load entirely, so it is only valid for terrain and
      *       chunk-path changes. Measuring a display-list change here understates
      *       it to near zero, which is exactly what happened the first time.</li>
-     *   <li><b>{@code VULKANMOD_FREEZE=restore}</b> changes no scene state; it
+     *   <li><b>{@code FREEZE=restore}</b> changes no scene state; it
      *       only puts the four gamerules back to their vanilla defaults and
      *       exits. Used to repair the bench save after a run that persisted
      *       them - {@code gamerule} writes to {@code level.dat}, so a bench that
@@ -300,19 +302,19 @@ public class MinecraftMixin {
      * </ul>
      */
     @Unique private static final String FREEZE_MODE =
-            System.getenv("VULKANMOD_FREEZE");
+            VulkanModConfig.get("FREEZE");
 
     @Unique private static final boolean FREEZE_SCENE =
             FREEZE_MODE != null && !"0".equals(FREEZE_MODE);
 
-    /** {@code VULKANMOD_FREEZE=kill} removes entities instead of replacing them. */
+    /** {@code FREEZE=kill} removes entities instead of replacing them. */
     @Unique private static final boolean FREEZE_KILL = "kill".equals(FREEZE_MODE);
 
-    /** {@code VULKANMOD_FREEZE=restore} only puts the gamerules back. */
+    /** {@code FREEZE=restore} only puts the gamerules back. */
     @Unique private static final boolean FREEZE_RESTORE = "restore".equals(FREEZE_MODE);
 
     /**
-     * {@code VULKANMOD_FREEZE=ground} summons the same fixed mob set but
+     * {@code FREEZE=ground} summons the same fixed mob set but
      * <b>without</b> {@code NoGravity}, so the mobs fall onto the terrain and
      * rest on it instead of hovering at spawn height.
      *
@@ -329,7 +331,7 @@ public class MinecraftMixin {
     @Unique private static final boolean FREEZE_GROUND = "ground".equals(FREEZE_MODE);
 
     /**
-     * VULKANMOD_PROFILE_DUMP=1 (bench mode only) forces vanilla's own Profiler
+     * PROFILE_DUMP=1 (bench mode only) forces vanilla's own Profiler
      * on for the whole run and dumps its section tree at auto-quit, which
      * attributes the parts of the frame the mod's own report cannot see
      * (terrain vs entities vs updatechunks vs clouds). The dump is a
@@ -337,7 +339,7 @@ public class MinecraftMixin {
      * sections but not for absolute timing.
      */
     @Unique private static final boolean PROFILE_DUMP =
-            "1".equals(System.getenv("VULKANMOD_PROFILE_DUMP"));
+            VulkanModConfig.getBool("PROFILE_DUMP", false);
 
     /**
      * Chunk streaming is not instant: at a high render distance a fresh launch
@@ -349,7 +351,7 @@ public class MinecraftMixin {
 
     @Unique
     private static long vulkanmod$benchMillis() {
-        String seconds = System.getenv("VULKANMOD_BENCH_SECONDS");
+        String seconds = VulkanModConfig.get("BENCH_SECONDS");
         if (seconds == null) {
             return 30_000L;
         }
@@ -393,10 +395,10 @@ public class MinecraftMixin {
                         server.getCommandManager().executeCommand(server, command);
                     } catch (Throwable t) {
                         failed++;
-                        VulkanMod.LOGGER.warn("[VKPROF] restore command failed: {}", command, t);
+                        VKProf.warn("[VKPROF] restore command failed: {}", command, t);
                     }
                 }
-                VulkanMod.LOGGER.info("[VKPROF] gamerules restored to vanilla ({} failed)", failed);
+                VKProf.info("[VKPROF] gamerules restored to vanilla ({} failed)", failed);
             });
             return;
         }
@@ -440,12 +442,11 @@ public class MinecraftMixin {
                         server.getCommandManager().executeCommand(server, command);
                     } catch (Throwable t) {
                         failed++;
-                        VulkanMod.LOGGER.warn("[VKPROF] freeze command failed: {}", command, t);
+                        VKProf.warn("[VKPROF] freeze command failed: {}", command, t);
                     }
                 }
             }
-            VulkanMod.LOGGER.info(
-                    "[VKPROF] scene frozen at ({}, {}, {}): clear weather, fixed noon, no mob spawning / random ticks, entities {} ({} failed)",
+            VKProf.info("[VKPROF] scene frozen at ({}, {}, {}): clear weather, fixed noon, no mob spawning / random ticks, entities {} ({} failed)",
                     String.format(java.util.Locale.ROOT, "%.1f", mc.player.posX),
                     String.format(java.util.Locale.ROOT, "%.1f", mc.player.posY),
                     String.format(java.util.Locale.ROOT, "%.1f", mc.player.posZ),
@@ -565,7 +566,7 @@ public class MinecraftMixin {
     @Unique
     private static void dumpProfiler(Minecraft mc) {
         try {
-            VulkanMod.LOGGER.info("[VKPROF] === vanilla profiler, {} average "
+            VKProf.info("[VKPROF] === vanilla profiler, {} average "
                     + "(values are percent of frame) ===",
                     profileWindowStarted ? "STEADY-STATE (post-warm-up)" : "run");
             dumpTree(mc.profiler, "root", 0);
@@ -590,7 +591,7 @@ public class MinecraftMixin {
             }
             // Built with String.format, not slf4j placeholders: slf4j only
             // understands "{}", so width specifiers would be logged literally.
-            VulkanMod.LOGGER.info("[VKPROF] {}",
+            VKProf.info("[VKPROF] {}",
                     String.format("%-" + (depth * 2 + 24) + "s %5.1f%%  of parent %5.1f%%",
                             "  ".repeat(depth) + r.profilerName,
                             r.totalUsePercentage, r.usePercentage));
@@ -599,7 +600,7 @@ public class MinecraftMixin {
     }
 
     /**
-     * VULKANMOD_SHOT=N captures one screenshot N seconds after joining.
+     * SHOT=N captures one screenshot N seconds after joining.
      *
      * glReadPixels was never implemented, so Minecraft's F2 (and every
      * diagnostic that needs pixels) silently produced nothing. With it now
@@ -614,7 +615,7 @@ public class MinecraftMixin {
     @Unique private static boolean screenshotFired = false;
 
     /**
-     * VULKANMOD_PIN_CAMERA=1 re-applies the bench viewpoint every frame until
+     * PIN_CAMERA=1 re-applies the bench viewpoint every frame until
      * the shot fires, instead of only once at the teleport.
      *
      * <p>Why (pass 24). The one-shot teleport is not enough to make two runs
@@ -630,14 +631,14 @@ public class MinecraftMixin {
      * <p>Pinning makes the camera an input rather than an outcome. Default OFF
      * so every earlier capture keeps its meaning.
      */
-    @Unique private static final boolean PIN_CAMERA = "1".equals(System.getenv("VULKANMOD_PIN_CAMERA"));
+    @Unique private static final boolean PIN_CAMERA = VulkanModConfig.getBool("PIN_CAMERA", false);
 
     /** Viewpoint last applied, so PIN_CAMERA can re-apply the same one. */
     @Unique private static double[] pinnedViewpoint = null;
 
     @Unique
     private static long vulkanmod$shotSeconds() {
-        String seconds = System.getenv("VULKANMOD_SHOT");
+        String seconds = VulkanModConfig.get("SHOT");
         if (seconds == null) {
             return 0L;
         }
@@ -650,7 +651,7 @@ public class MinecraftMixin {
 
     @Unique
     private static String vulkanmod$shotTag() {
-        String tag = System.getenv("VULKANMOD_SHOT_TAG");
+        String tag = VulkanModConfig.get("SHOT_TAG");
         if (tag == null || tag.isBlank()) {
             return "shot";
         }
@@ -672,7 +673,7 @@ public class MinecraftMixin {
         final int height = mc.displayHeight;
 
         if (width <= 0 || height <= 0) {
-            VulkanMod.LOGGER.warn("[VKPROF] screenshot skipped, zero-sized framebuffer");
+            VKProf.warn("[VKPROF] screenshot skipped, zero-sized framebuffer");
             return;
         }
 
@@ -706,7 +707,7 @@ public class MinecraftMixin {
             File out = new File(dir, "vulkanmod-" + SHOT_TAG + ".png");
             ImageIO.write(image, "PNG", out);
 
-            VulkanMod.LOGGER.info("[VKPROF] screenshot {}x{} meanRGB={} -> {}",
+            VKProf.info("[VKPROF] screenshot {}x{} meanRGB={} -> {}",
                     width, height, String.format("%.1f", sum / (double) (width * height * 3)),
                     out.getAbsolutePath());
         } catch (Throwable t) {
@@ -774,7 +775,7 @@ public class MinecraftMixin {
             mc.profiler.profilingEnabled = true;
         }
 
-        // VULKANMOD_SHOT without AUTOJOIN: stay on the main menu and capture it.
+        // SHOT without AUTOJOIN: stay on the main menu and capture it.
         //
         // A world screenshot has no text on screen (no chat, no F3, the hotbar
         // is icon-only), so the GUI font path - the one that renders glyph quads
@@ -791,14 +792,14 @@ public class MinecraftMixin {
                     && System.currentTimeMillis() - autoQuitStart > SHOT_SECONDS * 1000L) {
                 screenshotFired = true;
                 takeScreenshot(mc);
-                if ("1".equals(System.getenv("VULKANMOD_AUTOQUIT"))) {
-                    VulkanMod.LOGGER.info("[VKPROF] menu shot taken, quitting");
+                if (VulkanModConfig.getBool("AUTOQUIT", false)) {
+                    VKProf.info("[VKPROF] menu shot taken, quitting");
                     mc.shutdown();
                 }
             }
         }
 
-        if (!autoQuitFired && "1".equals(System.getenv("VULKANMOD_AUTOQUIT"))
+        if (!autoQuitFired && VulkanModConfig.getBool("AUTOQUIT", false)
                 && mc.getIntegratedServer() != null) {
             // Teleport to the fixed benchmark viewpoint (the forest scene from
             // the user's day/day2 RenderDoc captures) so A/B runs compare the
@@ -814,7 +815,7 @@ public class MinecraftMixin {
                     // close to the camera plus lit grass/stone.
                     //
                     // Pass 21: this is the branch EVERY bench run takes, because
-                    // run_once.sh/ab_flag.sh always set VULKANMOD_SHOT. The
+                    // run_once.sh/ab_flag.sh always set SHOT. The
                     // "benchmark viewpoint" below is the fallback, not the
                     // default - a fact worth knowing before reasoning about
                     // "the bench scene" from the wrong coordinates. The override
@@ -824,13 +825,13 @@ public class MinecraftMixin {
                     mc.player.setLocationAndAngles(vp[0], vp[1], vp[2], (float) vp[3], (float) vp[4]);
                     mc.player.setPositionAndUpdate(vp[0], vp[1], vp[2]);
                     pinnedViewpoint = vp;
-                    // TEMPORARY: VULKANMOD_THIRDPERSON=1 switches to the back view
+                    // TEMPORARY: THIRDPERSON=1 switches to the back view
                     // so the player model itself is on screen. The user reports
                     // that every entity's texture lands on the player, which is
                     // only visible from outside the player.
-                    if (System.getenv("VULKANMOD_THIRDPERSON") != null) {
+                    if (VulkanModConfig.getBool("THIRDPERSON", false)) {
                         mc.gameSettings.thirdPersonView = 1;
-                        VulkanMod.LOGGER.info("[VKPROF] third-person view enabled");
+                        VKProf.info("[VKPROF] third-person view enabled");
                     }
                     // In singleplayer the integrated server owns world time
                     // and overrides any client-side setWorldTime. Run /time
@@ -849,7 +850,7 @@ public class MinecraftMixin {
                     } else {
                         mc.world.setWorldTime(6000L);
                     }
-                    VulkanMod.LOGGER.info("[VKPROF] teleported to screenshot viewpoint ({}, {}, {} yaw={} pitch={})",
+                    VKProf.info("[VKPROF] teleported to screenshot viewpoint ({}, {}, {} yaw={} pitch={})",
                             vp[0], vp[1], vp[2], vp[3], vp[4]);
                 } else {
                     // Fixed position AND view angles: the rotation otherwise
@@ -861,7 +862,7 @@ public class MinecraftMixin {
                     mc.player.setLocationAndAngles(vp[0], vp[1], vp[2], (float) vp[3], (float) vp[4]);
                     mc.player.setPositionAndUpdate(vp[0], vp[1], vp[2]);
                     pinnedViewpoint = vp;
-                    VulkanMod.LOGGER.info("[VKPROF] teleported to benchmark viewpoint ({}, {}, {} yaw={} pitch={})",
+                    VKProf.info("[VKPROF] teleported to benchmark viewpoint ({}, {}, {} yaw={} pitch={})",
                             vp[0], vp[1], vp[2], vp[3], vp[4]);
                 }
             }
@@ -898,8 +899,7 @@ public class MinecraftMixin {
                     && System.currentTimeMillis() - autoQuitStart >= PROFILE_WARMUP_MILLIS) {
                 profileWindowStarted = true;
                 mc.profiler.clearProfiling();
-                VulkanMod.LOGGER.info(
-                        "[VKPROF] profiler accumulators cleared after {}s warm-up - the dump below covers the steady state only",
+                VKProf.info("[VKPROF] profiler accumulators cleared after {}s warm-up - the dump below covers the steady state only",
                         PROFILE_WARMUP_MILLIS / 1000L);
             }
 
@@ -922,8 +922,7 @@ public class MinecraftMixin {
                         // Self-report the exact camera the pixels were taken
                         // from: two runs whose lines differ are not comparable,
                         // and that is otherwise invisible in the PNGs.
-                        VulkanMod.LOGGER.info(
-                                "[VKPROF] shot camera pos=({}, {}, {}) yaw={} pitch={} onGround={}",
+                        VKProf.info("[VKPROF] shot camera pos=({}, {}, {}) yaw={} pitch={} onGround={}",
                                 String.format("%.3f", mc.player.posX),
                                 String.format("%.3f", mc.player.posY),
                                 String.format("%.3f", mc.player.posZ),
@@ -939,7 +938,7 @@ public class MinecraftMixin {
                     if (PROFILE_DUMP) {
                         dumpProfiler(mc);
                     }
-                    VulkanMod.LOGGER.info("[VKPROF] auto-quit after {}s in world", BENCH_MILLIS / 1000L);
+                    VKProf.info("[VKPROF] auto-quit after {}s in world", BENCH_MILLIS / 1000L);
                     mc.shutdown();
                 }
             }

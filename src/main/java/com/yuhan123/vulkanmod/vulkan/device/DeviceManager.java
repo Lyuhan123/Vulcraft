@@ -1,5 +1,6 @@
 package com.yuhan123.vulkanmod.vulkan.device;
 
+import com.yuhan123.vulkanmod.VKProf;
 import com.yuhan123.vulkanmod.VulkanMod;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
@@ -34,7 +35,7 @@ public abstract class DeviceManager {
     /**
      * Whether {@code VK_EXT_multi_draw} was offered by the picked physical device
      * AND successfully enabled at logical-device creation. The indirect/multi-draw
-     * terrain POC (VULKANMOD_INDIRECT=2) reads this to decide whether it can emit
+     * terrain POC (INDIRECT=2) reads this to decide whether it can emit
      * vkCmdDrawMultiIndexedEXT or must fall back to per-section draws. Never
      * required: a GPU without the extension simply skips the POC path.
      */
@@ -332,14 +333,14 @@ public abstract class DeviceManager {
         // why this device and not another. autoPickDevice() prefers a discrete GPU,
         // so a discrete GPU that is missing here either was never enumerated or
         // failed isDeviceSuitable (required extensions / swapchain surface).
-        VulkanMod.LOGGER.info("[VKPROF] Vulkan devices visible:{}", getAvailableDevicesInfo());
+        VKProf.info("[VKPROF] Vulkan devices visible:{}", getAvailableDevicesInfo());
 
         final StringBuilder suitable = new StringBuilder(96);
         for (Device d : suitableDevices) {
             suitable.append("\n  ").append(d.deviceName)
                     .append(" type=").append(d.properties.deviceType());
         }
-        VulkanMod.LOGGER.info("[VKPROF] suitable devices:{}", suitable.length() == 0 ? " none" : suitable);
+        VKProf.info("[VKPROF] suitable devices:{}", suitable.length() == 0 ? " none" : suitable);
 
         VkExtensionProperties.Buffer availableExtensions = getAvailableExtension(stackGet(), device.physicalDevice);
 
@@ -349,7 +350,7 @@ public abstract class DeviceManager {
                     .collect(toSet())
                     .contains("VK_EXT_multi_draw");
 
-            VulkanMod.LOGGER.info("[VKPROF] GPU: '{}' type={} api={}.{}.{} driver=0x{} EXT_multi_draw={}",
+            VKProf.info("[VKPROF] GPU: '{}' type={} api={}.{}.{} driver=0x{} EXT_multi_draw={}",
                     deviceProperties.deviceNameString(),
                     deviceProperties.deviceType(),
                     VK_VERSION_MAJOR(deviceProperties.apiVersion()),

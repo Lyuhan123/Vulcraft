@@ -1,5 +1,7 @@
 package com.yuhan123.vulkanmod.mixin.gl;
 
+import com.yuhan123.vulkanmod.VKProf;
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.VulkanMod;
 import com.yuhan123.vulkanmod.gl.MatrixState;
 import com.yuhan123.vulkanmod.gl.VkGlBuffer;
@@ -49,9 +51,9 @@ public class GlStateManagerMixin {
      * shader then discards, punching the cutout mask into a per-texel stipple with
      * sky bleeding through (the "tree-canopy sky punch-through" defect).
      *
-     * VULKANMOD_EARLYCUTOUT=1 re-attaches early_fragment_tests as a diagnostic; it
+     * EARLYCUTOUT=1 re-attaches early_fragment_tests as a diagnostic; it
      * reintroduces the sky punch-through but confirms whether cutout overdraw is
-     * the GPU bottleneck. The two-pass depth prepass (VULKANMOD_PREPASS) was
+     * the GPU bottleneck. The two-pass depth prepass (PREPASS) was
      * removed - see git history for the experiment.
      */
     private static boolean CUTOUT_PATH_LOGGED = false;
@@ -61,7 +63,7 @@ public class GlStateManagerMixin {
    // GL depth configuration in effect at the first chunk draw of each layer -
    // the ground truth the HEAD probe can miss if Minecraft sets the layer's depth
    // state after the HEAD hooks fire.
-   private static final boolean VULKANMOD_DEPTHXRAY_DRAW = System.getenv("VULKANMOD_DEPTHXRAY") != null;
+   private static final boolean VULKANMOD_DEPTHXRAY_DRAW = VulkanModConfig.getBool("DEPTHXRAY", false);
    private static final java.util.Set<String> VULKANMOD_XRAY_DRAW_LAYERS = new java.util.HashSet<>();
    private static void vulkanmod$xrayDrawDepth() {
       String layer = com.yuhan123.vulkanmod.render.util.XrayState.currentLayer;
@@ -831,7 +833,7 @@ public class GlStateManagerMixin {
    /**
     * DRAW-SPLIT microbenchmark (controlled draw-count vs fixed geometry).
     *
-    * <p>Set via {@code -Dvulkanmod.drawSplit=N} (daemon-safe) or {@code VULKANMOD_DRAW_SPLIT=N}
+    * <p>Set via {@code -Dvulkanmod.drawSplit=N} (daemon-safe) or {@code DRAW_SPLIT=N}
     * (export, then kill the gradle daemon so it inherits the env). N re-issues each
     * chunk section as N draws over the SAME vertex range (firstVertex carries the
     * slice offset), so total geometry is unchanged and only the draw-call count scales.
@@ -845,7 +847,7 @@ public class GlStateManagerMixin {
    @Unique
    private static int parseDrawSplit() {
       String v = System.getProperty("vulkanmod.drawSplit");
-      if (v == null) v = System.getenv("VULKANMOD_DRAW_SPLIT");
+      if (v == null) v = VulkanModConfig.get("DRAW_SPLIT");
       if (v == null || v.isEmpty()) return 1;
       try {
          int n = Integer.parseInt(v.trim());
@@ -869,7 +871,7 @@ public class GlStateManagerMixin {
       if (DRAW_SPLIT > 1) {
          if (!DRAW_SPLIT_LOGGED) {
             DRAW_SPLIT_LOGGED = true;
-            VulkanMod.LOGGER.info("[VKPROF] DRAW_SPLIT={} active: each chunk section re-issued as {} draws, geometry unchanged",
+            VKProf.info("[VKPROF] DRAW_SPLIT={} active: each chunk section re-issued as {} draws, geometry unchanged",
                   DRAW_SPLIT, DRAW_SPLIT);
          }
          if (vertexCount > DRAW_SPLIT) {
@@ -953,7 +955,7 @@ public class GlStateManagerMixin {
                      // attached, because it would write depth for fragments the
                      // shader then discards, punching the cutout mask into a
                      // per-texel stipple with sky bleeding through (the
-                     // "tree-canopy sky punch-through" defect). VULKANMOD_EARLYCUTOUT=1
+                     // "tree-canopy sky punch-through" defect). EARLYCUTOUT=1
                      // re-attaches it as a diagnostic (reintroduces that defect).
                      // The two-pass depth prepass was removed - see git history.
                      // NOTE: buildFormatFromPointers() constructs a fresh
@@ -965,8 +967,8 @@ public class GlStateManagerMixin {
 
                      if (!CUTOUT_PATH_LOGGED && blockFormat && VRenderSystem.alphaTest && VRenderSystem.depthMask) {
                         CUTOUT_PATH_LOGGED = true;
-                        VulkanMod.LOGGER.info("[VKPROF] cutout path: single-pass early-Z{}",
-                              System.getenv("VULKANMOD_EARLYCUTOUT") != null ? " (VULKANMOD_EARLYCUTOUT)" : "");
+                        VKProf.info("[VKPROF] cutout path: single-pass early-Z{}",
+                              VulkanModConfig.getBool("EARLYCUTOUT", false) ? " (VULKANMOD_EARLYCUTOUT)" : "");
                      }
 
                     if (VULKANMOD_DEPTHXRAY_DRAW) { vulkanmod$xrayDrawDepth(); }

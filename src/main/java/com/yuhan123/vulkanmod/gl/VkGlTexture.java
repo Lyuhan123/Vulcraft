@@ -1,5 +1,7 @@
 package com.yuhan123.vulkanmod.gl;
 
+import com.yuhan123.vulkanmod.VKProf;
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceOpenHashMap;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import com.yuhan123.vulkanmod.vulkan.memory.MemoryManager;
@@ -51,15 +53,15 @@ public class VkGlTexture {
      * those is what makes distant (minified) terrain sample from a small mip
      * instead of thrashing the texture cache at mip 0.
      *
-     * Set VULKANMOD_MIP=0 to restore the previous single-level behaviour.
+     * Set MIP=0 to restore the previous single-level behaviour.
      */
-    private static final boolean MIP_ENABLED = !"0".equals(System.getenv("VULKANMOD_MIP"));
+    private static final boolean MIP_ENABLED = VulkanModConfig.getBool("MIP", true);
 
     private static boolean MIP_LOGGED;
 
     /**
      * Grow each sprite's colour into its own fully transparent texels, leaving
-     * alpha at 0. VULKANMOD_ALPHADILATE=0 disables it.
+     * alpha at 0. ALPHADILATE=0 disables it.
      *
      * <p>Minecraft's cutout textures (grass, leaves) store black in the
      * transparent area. Building a mip chain box-filters that black into the
@@ -70,7 +72,7 @@ public class VkGlTexture {
      * test still cuts exactly the same silhouette; only the (invisible) RGB of
      * discarded texels changes.
      */
-    private static final boolean ALPHA_DILATE = !"0".equals(System.getenv("VULKANMOD_ALPHADILATE"));
+    private static final boolean ALPHA_DILATE = VulkanModConfig.getBool("ALPHADILATE", true);
 
     /**
      * Textures whose mip chain must be rebuilt from the (dilated) level 0.
@@ -105,8 +107,7 @@ public class VkGlTexture {
                 com.yuhan123.vulkanmod.vulkan.texture.ImageUtil.generateMipmaps(image);
                 MIP_REBUILD_DONE.add(image);
             } catch (Throwable t) {
-                com.yuhan123.vulkanmod.VulkanMod.LOGGER.warn(
-                        "[VKPROF] mip rebuild failed for {}x{}: {}",
+                com.yuhan123.vulkanmod.VKProf.warn("[VKPROF] mip rebuild failed for {}x{}: {}",
                         image.width, image.height, t.toString());
             }
         }
@@ -249,8 +250,7 @@ public class VkGlTexture {
         }
         if (!shadowClampReported) {
             shadowClampReported = true;
-            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(
-                    "[VKPROF] shadow texture id={} {}x{} clamp={} minFilter={} magFilter={} maxLevel={} mipLevels={}",
+            com.yuhan123.vulkanmod.VKProf.info("[VKPROF] shadow texture id={} {}x{} clamp={} minFilter={} magFilter={} maxLevel={} mipLevels={}",
                     boundTexture.id, boundTexture.width, boundTexture.height, boundTexture.clamp,
                     boundTexture.minFilter, boundTexture.magFilter, boundTexture.maxLevel,
                     boundTexture.vulkanImage == null ? -1 : boundTexture.vulkanImage.mipLevels);
@@ -505,8 +505,7 @@ public class VkGlTexture {
                 && boundTexture.vulkanImage.mipLevels > 1) {
             if (!MIP_LOGGED) {
                 MIP_LOGGED = true;
-                com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(
-                        "[VKPROF] mipmap: generating {} levels for {}x{}",
+                com.yuhan123.vulkanmod.VKProf.info("[VKPROF] mipmap: generating {} levels for {}x{}",
                         boundTexture.vulkanImage.mipLevels,
                         boundTexture.vulkanImage.width, boundTexture.vulkanImage.height);
             }
@@ -682,13 +681,13 @@ public class VkGlTexture {
     }
 
     void generateMipmaps() {
-        // TEMPORARY: VULKANMOD_NOMIP=1 skips mip generation entirely. The mip
+        // TEMPORARY: NOMIP=1 skips mip generation entirely. The mip
         // chain is the leading hypothesis for the per-texel canopy holes, and a
         // code-level fix is only worth writing once a measurement shows the mips
         // are actually implicated. Skipping generation altogher is the cleanest
         // possible test of that: if the holes vanish, the mips are guilty; if
         // they persist, the mips are exonerated and the cause is elsewhere.
-        if (System.getenv("VULKANMOD_NOMIP") != null) {
+        if (VulkanModConfig.getBool("NOMIP", false)) {
             return;
         }
         ImageUtil.generateMipmaps(vulkanImage);

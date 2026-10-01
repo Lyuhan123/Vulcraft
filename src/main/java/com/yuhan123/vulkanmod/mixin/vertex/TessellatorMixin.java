@@ -1,5 +1,7 @@
 package com.yuhan123.vulkanmod.mixin.vertex;
 
+import com.yuhan123.vulkanmod.VKProf;
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.render.PipelineManager;
 import com.yuhan123.vulkanmod.render.shader.ShaderInstance;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
@@ -65,7 +67,7 @@ public class TessellatorMixin {
         if (com.yuhan123.vulkanmod.render.util.FrameProfiler.entLoopOpen()) {
         }
 
-        // TEMP DIAGNOSTIC (VULKANMOD_FBDBG=1): the falling-block report describes
+        // TEMP DIAGNOSTIC (FBDBG=1): the falling-block report describes
         // blocks that turn sky-coloured in some chunks, normal in others, with a
         // gradient between - the classic signature of a lightmap coordinate that
         // varies with world position. Falling blocks render through the BLOCK
@@ -76,7 +78,7 @@ public class TessellatorMixin {
         // BLOCK, and for BLOCK decode the raw UV2 (little-endian shorts at byte
         // 24) so we can see whether it carries a real packed-light value or some
         // stray world coordinate. Cap 64.
-        if (System.getenv("VULKANMOD_FBDBG") != null && fbdbgDumps < 64
+        if (VulkanModConfig.getBool("FBDBG", false) && fbdbgDumps < 64
                 && (vertexFormat == net.minecraft.client.renderer.vertex.DefaultVertexFormats.ITEM
                     || vertexFormat == net.minecraft.client.renderer.vertex.DefaultVertexFormats.BLOCK)) {
             fbdbgDumps++;
@@ -105,7 +107,7 @@ public class TessellatorMixin {
                     com.yuhan123.vulkanmod.vulkan.VRenderSystem.getShaderFogEnd()));
             final float[] col = com.yuhan123.vulkanmod.vulkan.VRenderSystem.getColor();
             sb.append(String.format(" color=(%.2f,%.2f,%.2f,%.2f)", col[0], col[1], col[2], col[3]));
-            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(sb.toString());
+            com.yuhan123.vulkanmod.VKProf.info(sb.toString());
             // first two vertices, raw 32-bit words (decode helper: pos=w0..2,
             // vColor=w3, uv0=w4..5, [BLOCK] uv2=w6, normal=w7).
             for (int vv = 0; vv < 2 && vv < vertexCount; vv++) {
@@ -113,11 +115,11 @@ public class TessellatorMixin {
                 for (int i = 0; i < stride / 4; i++) {
                     vb.append(String.format(" %08x", vertexData.getInt(vv * stride + i * 4)));
                 }
-                com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(vb.toString());
+                com.yuhan123.vulkanmod.VKProf.info(vb.toString());
             }
         }
 
-        // CLOUD DIAGNOSTIC (VULKANMOD_CLOUDDIAG=1): clouds render through this
+        // CLOUD DIAGNOSTIC (CLOUDDIAG=1): clouds render through this
         // immediate path as either POSITION_TEX_COLOR (fast: one 1024-vertex
         // 16x16 grid) or POSITION_TEX_COLOR_NORMAL (fancy: many small tiles with
         // a modelview scale(12,1,12)). Both bake Vanilla's camera XZ offset into
@@ -125,14 +127,13 @@ public class TessellatorMixin {
         // position+UV so we can see (a) whether the modelview carries a
         // camera-position translate (mvpT.x/y large instead of ~0) and (b)
         // whether the captured UV still has Vanilla's offset. Capped at 16 dumps.
-        if (System.getenv("VULKANMOD_CLOUDDIAG") != null && cloudDiagDumps < 16
+        if (VulkanModConfig.getBool("CLOUDDIAG", false) && cloudDiagDumps < 16
                 && (vertexFormat == net.minecraft.client.renderer.vertex.DefaultVertexFormats.POSITION_TEX_COLOR
                     || vertexFormat == net.minecraft.client.renderer.vertex.DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL)) {
             cloudDiagDumps++;
             final boolean fancy = vertexFormat == net.minecraft.client.renderer.vertex.DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL;
             final java.nio.FloatBuffer mvp = com.yuhan123.vulkanmod.vulkan.VRenderSystem.mvpFloatBuffer();
-            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(String.format(
-                    "[VKPROF] CLOUDDIAG #%d fmt=%s count=%d mvpT=(%.2f,%.2f,%.2f) proj?m=%.4f",
+            com.yuhan123.vulkanmod.VKProf.info(String.format("[VKPROF] CLOUDDIAG #%d fmt=%s count=%d mvpT=(%.2f,%.2f,%.2f) proj?m=%.4f",
                     cloudDiagDumps, fancy ? "PTCN" : "PTC", vertexCount, mvp.get(12), mvp.get(13), mvp.get(14), mvp.get(0)));
             final int stride = vertexFormat.getSize();
             for (int vv = 0; vv < 2 && vv < vertexCount; vv++) {
@@ -144,8 +145,7 @@ public class TessellatorMixin {
                 final float u = vertexData.getFloat(base + 12);
                 final float v = vertexData.getFloat(base + 16);
                 vertexData.position(0);
-                com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(String.format(
-                        "[VKPROF] CLOUDDIAG v%d pos=(%.1f,%.1f,%.1f) uv=(%.6f,%.6f) stride=%d",
+                com.yuhan123.vulkanmod.VKProf.info(String.format("[VKPROF] CLOUDDIAG v%d pos=(%.1f,%.1f,%.1f) uv=(%.6f,%.6f) stride=%d",
                         vv, px, py, pz, u, v, stride));
             }
         }
@@ -156,7 +156,7 @@ public class TessellatorMixin {
     private static int fbdbgDumps = 0;
 
     /**
-     * CLOUD DIAGNOSTIC (VULKANMOD_CLOUDDIAG=1): confirm whether the cloud draw's
+     * CLOUD DIAGNOSTIC (CLOUDDIAG=1): confirm whether the cloud draw's
      * modelview carries a camera-position translate and whether the captured UV
      * still carries Vanilla's camera offset. Catches both fast clouds
      * (POSITION_TEX_COLOR, 1024 verts) and fancy clouds (POSITION_TEX_COLOR_NORMAL).
@@ -182,7 +182,7 @@ public class TessellatorMixin {
             dataF.setAccessible(true);
             lightmapTexels = (int[]) dataF.get(tex);
         } catch (Throwable t) {
-            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[VKPROF] FBDBG lightmap fetch failed: {}", t.toString());
+            com.yuhan123.vulkanmod.VKProf.info("[VKPROF] FBDBG lightmap fetch failed: {}", t.toString());
             lightmapTexels = new int[0];
         }
         return lightmapTexels;
