@@ -1,13 +1,19 @@
 package com.yuhan123.vulkanmod.vulkan.texture;
 
+import com.yuhan123.vulkanmod.VulkanMod;
+import com.yuhan123.vulkanmod.gl.VkGlTexture;
 import com.yuhan123.vulkanmod.render.texture.ImageUploadHelper;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
 import com.yuhan123.vulkanmod.vulkan.device.DeviceManager;
+import com.yuhan123.vulkanmod.vulkan.framebuffer.Framebuffer;
+import com.yuhan123.vulkanmod.vulkan.framebuffer.RenderPass;
+import com.yuhan123.vulkanmod.vulkan.framebuffer.SwapChain;
 import com.yuhan123.vulkanmod.vulkan.memory.MemoryManager;
 import com.yuhan123.vulkanmod.vulkan.memory.buffer.Buffer;
 import com.yuhan123.vulkanmod.vulkan.queue.CommandPool;
 import com.yuhan123.vulkanmod.vulkan.util.VUtil;
 import org.lwjgl.PointerBuffer;
+import org.lwjgl.opengl.GL11;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.*;
 
@@ -210,6 +216,188 @@ public abstract class ImageUtil {
 
             Renderer.getInstance().getMainPass().rebindMainTarget();
 
+        }
+    }
+
+    /** TEMP DIAGNOSTIC (remove). */
+    private static int BG_DUMPED = 0;
+
+    /** TEMP DIAGNOSTIC (remove): dump the swapchain image of the current frame. */
+    public static void dumpMainTargetPng(String name) {
+        try {
+            SwapChain sc = Renderer.getInstance().getSwapChain();
+            if (sc == null) {
+                VulkanMod.LOGGER.warn("[VKPROF] main target dump skipped, no swapchain");
+                return;
+            }
+            dumpTexturePng(sc.getColorAttachment(), name);
+        } catch (Throwable t) {
+            VulkanMod.LOGGER.warn("[VKPROF] main target dump failed", t);
+        }
+    }
+
+    /** TEMP DIAGNOSTIC (remove): read an image back to host memory and save it as a PNG. */
+    private static void dumpTexturePng(VulkanImage image, String name) {
+        try {
+            java.nio.ByteBuffer tmp = org.lwjgl.system.MemoryUtil.memAlloc(image.width * image.height * 4);
+            downloadTexture(image, org.lwjgl.system.MemoryUtil.memAddress0(tmp));
+            java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(
+                    image.width, image.height, java.awt.image.BufferedImage.TYPE_INT_RGB);
+            for (int y = 0; y < image.height; y++) {
+                for (int x = 0; x < image.width; x++) {
+                    int i = (y * image.width + x) * 4;
+                    int r = tmp.get(i) & 0xFF, g = tmp.get(i + 1) & 0xFF, b = tmp.get(i + 2) & 0xFF;
+                    img.setRGB(x, y, (r << 16) | (g << 8) | b);
+                }
+            }
+            org.lwjgl.system.MemoryUtil.memFree(tmp);
+            javax.imageio.ImageIO.write(img, "PNG", new java.io.File(name));
+            VulkanMod.LOGGER.info("[VKPROF] dumped {} ({}x{}) -> {}", name, image.width, image.height,
+                    new java.io.File(name).getAbsolutePath());
+        } catch (Throwable t) {
+            VulkanMod.LOGGER.warn("[VKPROF] texture dump failed", t);
+        }
+    }
+
+    /**
+     * GL {@code glCopyTexSubImage2D} for the 1.12.2 main-menu panorama skybox.
+     *
+     * <p>{@code GuiMainMenu.renderSkybox} unbinds the MC framebuffer, draws the
+     * rotating panorama into the 256x256 viewport, then calls
+     * {@code rotateAndBlurSkybox()} seven times. Each of those binds
+     * {@code backgroundTexture}, pulls the 256x256 backbuffer region into it with
+     * this call, and re-draws it three times to accumulate the blur. If the copy
+     * never lands, {@code backgroundTexture} keeps whatever the driver last left
+     * in that allocation, so the final full-screen quad shows unrelated atlas /
+     * GUI content - the "unwanted materials covering the main-menu background"
+     * report.
+     *
+     * <p>Source is the swapchain: {@code renderSkybox} calls
+     * {@code unbindFramebuffer()} before drawing, so the backbuffer is the
+     * swapchain image. Destination is the currently bound 2D texture.
+     */
+    public static void copyTexSubImage2D(int target, int level, int xoffset, int yoffset,
+                                         int x, int y, int width, int height) {
+        if (target != GL11.GL_TEXTURE_2D || level != 0)
+            return;
+        if (!Renderer.isRecording())
+            return;
+
+        VkGlTexture dstTex = VkGlTexture.getBoundTexture();
+        if (dstTex == null)
+            return;
+        VulkanImage dstImage = dstTex.getVulkanImage();
+        if (dstImage == null)
+            return;
+
+        VulkanImage srcImage = null;
+        Framebuffer boundFramebuffer = Renderer.getInstance().getBoundFramebuffer();
+        if (boundFramebuffer != null)
+            srcImage = boundFramebuffer.getColorAttachment();
+        if (srcImage == null) {
+            SwapChain swapChain = Renderer.getInstance().getSwapChain();
+            if (swapChain != null) {
+                if (!swapChain.hasTransferSrc())
+                    return;
+                srcImage = swapChain.getColorAttachment();
+            }
+        }
+        if (srcImage == null)
+            return;
+
+        // Clamp to both images' bounds: a region larger than either attachment
+        // would make the blit invalid, and the driver answer to that is a lost
+        // device (a black frame), not a visible error.
+        int sw = Math.min(width, srcImage.width - x);
+        int sh = Math.min(height, srcImage.height - y);
+        int dw = Math.min(width, dstImage.width - xoffset);
+        int dh = Math.min(height, dstImage.height - yoffset);
+        if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
+            return;
+
+        // GL addresses the framebuffer bottom-up, Vulkan top-down: a GL rect at y
+        // of height h covers image rows [H-h-y, H-y). Same convention as
+        // VkGlFramebuffer.readPixels, which is the authority for this mapping.
+        int srcY = srcImage.height - sh - y;
+        copyFramebufferRegionToTexture(srcImage, dstImage, x, srcY, sw, sh, xoffset, yoffset, dw, dh);
+    }
+
+    /**
+     * Lower-level region blit from one image's colour attachment to another, used
+     * by {@link #copyTexSubImage2D}. No flip: the panorama is drawn and the
+     * texture is later sampled by a quad using the same (positive, GL-bottom-up)
+     * viewport convention, so a 1:1 copy reproduces the on-screen pixels.
+     */
+    public static void copyFramebufferRegionToTexture(VulkanImage srcImage, VulkanImage dstImage,
+                                                      int srcX, int srcY, int srcW, int srcH,
+                                                      int dstX, int dstY, int dstW, int dstH) {
+        MemoryStack stack = stackPush();
+        boolean hadPass = false;
+        try {
+            VkCommandBuffer commandBuffer = Renderer.getCommandBuffer();
+
+            // vkCmdBlitImage is not allowed inside a render pass, so the bound
+            // pass has to be closed first. Go through Renderer.endRenderPass()
+            // (it clears boundRenderPass AND boundFramebuffer plus the pending
+            // pipeline bind, keeping the two in sync); the direct RenderPass call
+            // is only a fallback for the case its guard refuses, because leaving
+            // boundFramebuffer set while boundRenderPass is null makes the next
+            // rebindMainTarget() NPE.
+            Renderer renderer = Renderer.getInstance();
+            if (renderer.getBoundRenderPass() != null) {
+                renderer.endRenderPass(commandBuffer);
+                RenderPass stillBound = renderer.getBoundRenderPass();
+                if (stillBound != null) {
+                    stillBound.endRenderPass(commandBuffer);
+                    renderer.setBoundFramebuffer(null);
+                }
+                hadPass = true;
+            }
+
+            srcImage.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            dstImage.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+            VkImageBlit.Buffer blit = VkImageBlit.calloc(1, stack);
+            blit.srcOffsets(0, VkOffset3D.calloc(stack).set(srcX, srcY, 0));
+            blit.srcOffsets(1, VkOffset3D.calloc(stack).set(srcX + srcW, srcY + srcH, 1));
+            blit.srcSubresource()
+                .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+                .mipLevel(0)
+                .baseArrayLayer(0)
+                .layerCount(1);
+            blit.dstOffsets(0, VkOffset3D.calloc(stack).set(dstX, dstY, 0));
+            blit.dstOffsets(1, VkOffset3D.calloc(stack).set(dstX + dstW, dstY + dstH, 1));
+            blit.dstSubresource()
+                .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+                .mipLevel(0)
+                .baseArrayLayer(0)
+                .layerCount(1);
+
+            vkCmdBlitImage(commandBuffer, srcImage.getId(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           dstImage.getId(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, blit, VK_FILTER_NEAREST);
+
+            dstImage.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+            // TEMP DIAGNOSTIC (remove): dump what the blit actually wrote, plus
+            // the whole source framebuffer, at a steady-state copy.
+            if (BG_DUMPED >= 0 && BG_DUMPED < 100) {
+                BG_DUMPED++;
+                if (BG_DUMPED == 100) {
+                    dumpTexturePng(dstImage, "menu_bg_dump.png");
+                    dumpTexturePng(srcImage, "menu_swap_dump.png");
+                }
+            }
+        } finally {
+            // Resume the swapchain pass so the rest of drawScreen has somewhere
+            // to draw even if the blit above threw.
+            if (hadPass) {
+                try {
+                    Renderer.getInstance().getMainPass().rebindMainTarget();
+                } catch (Throwable t) {
+                    VulkanMod.LOGGER.warn("[VKPROF] copyTexSubImage2D rebind failed", t);
+                }
+            }
+            stack.close();
         }
     }
 

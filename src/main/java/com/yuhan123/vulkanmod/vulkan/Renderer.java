@@ -1205,11 +1205,31 @@ public class Renderer {
 
         VkViewport.Buffer viewport = VkViewport.malloc(1, stack);
         viewport.x(x);
-        viewport.y(height + y);
+
+        // GL viewports are anchored at the BOTTOM-left; Vulkan's are at the TOP.
+        // The flip therefore has to be measured from the render target's height,
+        // not from the viewport's own height: with the old `height + y`, a
+        // partial viewport of height h only landed correctly when it happened to
+        // be flush with the top of the target (h + y == targetHeight, which is
+        // exactly the full-screen case). The 1.12.2 main menu is the one place
+        // that uses a partial viewport - GuiMainMenu.renderSkybox draws the
+        // panorama through viewport(0,0,256,256) - so the panorama was drawn in
+        // the TOP 256 rows while glCopyTexSubImage2D reads the BOTTOM 256 rows
+        // (GL semantics), which is why the menu background never received it.
+        int targetHeight = 0;
+        if (INSTANCE.boundFramebuffer != null)
+            targetHeight = INSTANCE.boundFramebuffer.getHeight();
+        else if (INSTANCE.getSwapChain() != null)
+            targetHeight = INSTANCE.getSwapChain().getHeight();
+
+        // Fall back to the old behaviour when the target size is unknown (e.g.
+        // before the first swapchain exists).
+        viewport.y(targetHeight > 0 ? targetHeight - y : height + y);
         viewport.width(width);
         viewport.height(-height);
         viewport.minDepth(0.0f);
         viewport.maxDepth(1.0f);
+
 
         long __c = FrameProfiler.start();
         vkCmdSetViewport(INSTANCE.currentCmdBuffer, 0, viewport);

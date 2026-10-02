@@ -320,7 +320,8 @@ public class GL11Mixin {
      */
     @Overwrite(remap = false)
     public static void glCopyTexSubImage2D(@NativeType("GLenum") int target, @NativeType("GLint") int level, @NativeType("GLint") int xoffset, @NativeType("GLint") int yoffset, @NativeType("GLint") int x, @NativeType("GLint") int y, @NativeType("GLsizei") int width, @NativeType("GLsizei") int height) {
-        // TODO
+        com.yuhan123.vulkanmod.vulkan.texture.ImageUtil.copyTexSubImage2D(
+                target, level, xoffset, yoffset, x, y, width, height);
     }
 
     /**

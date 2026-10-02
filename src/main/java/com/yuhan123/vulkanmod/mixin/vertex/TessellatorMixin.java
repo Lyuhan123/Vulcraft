@@ -1,14 +1,16 @@
 package com.yuhan123.vulkanmod.mixin.vertex;
 
-import com.yuhan123.vulkanmod.VKProf;
 import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.render.PipelineManager;
 import com.yuhan123.vulkanmod.render.shader.ShaderInstance;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
 import com.yuhan123.vulkanmod.vulkan.shader.Pipeline;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.BufferBuilder;
+import net.minecraft.client.renderer.EntityRenderer;
 import net.minecraft.client.renderer.Tessellator;
 import net.minecraft.client.renderer.WorldVertexBufferUploader;
+import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexFormat;
 import org.spongepowered.asm.mixin.Mixin;
@@ -166,21 +168,35 @@ public class TessellatorMixin {
     /** CPU-side lightmap pixels (EntityRenderer.lightmapTexture's int[]), fetched once. */
     private static int[] lightmapTexels;
 
+    /**
+     * The three fields this walks are private/final in vanilla; they are read
+     * through the accessor mixins {@code MinecraftAccessor},
+     * {@code EntityRendererAccessor} and {@code DynamicTextureAccessor}, whose
+     * targets are remapped via {@code vulcraft.mixin-refmap.json}.
+     *
+     * <p>Access Transformer would be the natural tool here, but Unimined's
+     * cleanroom AT route resolves {@code top.outlands:accesstransformers:8.3.0},
+     * which is not published in any repository, so it cannot be built.
+     *
+     * <p>This used to walk the field chain with {@code getDeclaredField}. That
+     * cost three reflective lookups plus {@code setAccessible} and, worse, keyed
+     * off MCP names: reobfuscation renames those members, so in the exported jar
+     * every lookup threw NoSuchFieldException and this silently handed back an
+     * empty array instead of the lightmap.
+     */
     private static int[] lightmapTexels() {
         if (lightmapTexels != null) {
             return lightmapTexels;
         }
         try {
-            java.lang.reflect.Field erF = net.minecraft.client.Minecraft.getMinecraft().getClass()
-                    .getDeclaredField("entityRenderer");
-            erF.setAccessible(true);
-            Object er = erF.get(net.minecraft.client.Minecraft.getMinecraft());
-            java.lang.reflect.Field lmF = er.getClass().getDeclaredField("lightmapTexture");
-            lmF.setAccessible(true);
-            Object tex = lmF.get(er);
-            java.lang.reflect.Field dataF = tex.getClass().getDeclaredField("dynamicTextureData");
-            dataF.setAccessible(true);
-            lightmapTexels = (int[]) dataF.get(tex);
+            // Field access through accessor mixins (remapped by the refmap), not
+            // reflection: no getDeclaredField lookup, no setAccessible, and no
+            // MCP-name dependency to break once the jar is reobfuscated.
+            EntityRenderer er = ((com.yuhan123.vulkanmod.mixin.MinecraftAccessor)
+                    Minecraft.getMinecraft()).getEntityRenderer();
+            DynamicTexture tex = ((com.yuhan123.vulkanmod.mixin.EntityRendererAccessor) er).getLightmapTexture();
+            lightmapTexels = ((com.yuhan123.vulkanmod.mixin.texture.DynamicTextureAccessor) tex)
+                    .getDynamicTextureData();
         } catch (Throwable t) {
             com.yuhan123.vulkanmod.VKProf.info("[VKPROF] FBDBG lightmap fetch failed: {}", t.toString());
             lightmapTexels = new int[0];

@@ -2,9 +2,15 @@
   "required": true,
   "package": "com.yuhan123.vulkanmod.mixin",
   "compatibilityLevel": "JAVA_8",
+  "refmap": "vulcraft.mixin-refmap.json",
   "target": "@env(DEFAULT)",
-  "client": [
+    "client": [
     "MinecraftMixin",
+    "MinecraftAccessor",
+    "EntityRendererAccessor",
+    "vertex.VertexBufferAccessor",
+    "chunk.ChunkRenderContainerAccessor",
+    "texture.DynamicTextureAccessor",
     "gl.GlAllocationMixin",
     "gl.GlStateManagerMixin",
     "gl.OpenGlHelperMixin",
