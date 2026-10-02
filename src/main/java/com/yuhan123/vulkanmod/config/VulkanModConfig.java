@@ -36,7 +36,7 @@ import com.yuhan123.vulkanmod.VulkanMod;
  */
 public final class VulkanModConfig {
 
-    public static final String FILE_NAME = "vulkanmod.properties";
+    public static final String FILE_NAME = "vulcraft.properties";
 
     private static final Map<String, String> VALUES = new HashMap<String, String>();
     private static volatile boolean loaded = false;
