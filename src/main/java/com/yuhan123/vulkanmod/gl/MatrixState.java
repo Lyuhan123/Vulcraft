@@ -66,6 +66,23 @@ public class MatrixState {
         mode = m;
     }
 
+    /**
+     * Resets the TEXTURE matrix to identity and publishes it.
+     *
+     * <p>In GL the texture matrix is per texture unit; {@code enableLightmap}
+     * fills unit 1's copy with {@code scale(1/256) + translate(8)} and leaves it
+     * there. VulkanMod keeps a single shared stack and now feeds it to the
+     * shaders (position_tex_color.vsh, for the cloud layer), so the lightmap's
+     * transform would otherwise leak into the next unit-0 draw and wreck its UVs
+     * (GUI text/icons). Our shaders derive lightmap coordinates arithmetically
+     * ({@code (UV2 + 8) / 256}) and never consume this matrix, so clearing it at
+     * {@code disableLightmap} is both safe and necessary.
+     */
+    public static void resetTextureMatrix() {
+        textureStack.peek().identity();
+        VRenderSystem.setTextureMatrix(textureStack.peek());
+    }
+
     public static void loadIdentity() {
         long __t = FrameProfiler.start();
         current().identity();
@@ -223,9 +240,18 @@ public class MatrixState {
      * one suffices.
      */
     private static void applyCurrentMatrices() {
-        // The texture matrix (lightmap) is not consumed by the Vulkan shaders
         VRenderSystem.applyModelViewMatrix(modelViewStack.peek());
         VRenderSystem.applyProjectionMatrix(projectionStack.peek());
+
+        // Publish the GL_TEXTURE matrix too. Forge's CloudRenderer makes the
+        // cloud layer world-fixed by translating the TEXTURE matrix every frame
+        // (the mesh UVs are static; the modelview translate only steps the layer
+        // in whole-cloud increments and the texture translate supplies the
+        // fractional remainder). Dropping it - as this method used to - left the
+        // cloud layer glued to the camera, i.e. "clouds move with the player".
+        // The value is consumed by position_tex_color.vsh via the "TextureMat"
+        // push constant and is identity for every draw that does not set it.
+        VRenderSystem.setTextureMatrix(textureStack.peek());
 
         // TEMP DIAGNOSTIC (remove): report the projection the FIRST draw after
         // the panorama's gluPerspective actually uses, so "the perspective never

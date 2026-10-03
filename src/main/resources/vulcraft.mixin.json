@@ -8,6 +8,7 @@
     "MinecraftMixin",
     "MinecraftAccessor",
     "EntityRendererAccessor",
+    "EntityRendererMixin",
     "vertex.VertexBufferAccessor",
     "chunk.ChunkRenderContainerAccessor",
     "texture.DynamicTextureAccessor",
