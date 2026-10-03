@@ -4,11 +4,10 @@
   "compatibilityLevel": "JAVA_8",
   "refmap": "vulcraft.mixin-refmap.json",
   "target": "@env(DEFAULT)",
-    "client": [
+  "client": [
     "MinecraftMixin",
     "MinecraftAccessor",
     "EntityRendererAccessor",
-    "EntityRendererMixin",
     "vertex.VertexBufferAccessor",
     "chunk.ChunkRenderContainerAccessor",
     "texture.DynamicTextureAccessor",
