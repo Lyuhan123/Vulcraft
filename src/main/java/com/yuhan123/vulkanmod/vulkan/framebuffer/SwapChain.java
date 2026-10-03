@@ -48,6 +48,8 @@ public class SwapChain extends Framebuffer {
     private List<VulkanImage> depthAttachments;
     private VkExtent2D extent2D;
     public boolean isBGRAformat;
+    /** Whether the surface accepted VK_IMAGE_USAGE_TRANSFER_SRC_BIT (see createSwapChain). */
+    private boolean hasTransferSrc = false;
     private boolean vsync = false;
 
     public SwapChain() {
@@ -116,7 +118,21 @@ public class SwapChain extends Framebuffer {
             createInfo.imageColorSpace(surfaceFormat.colorSpace());
             createInfo.imageExtent(extent);
             createInfo.imageArrayLayers(1);
-            createInfo.imageUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            // TRANSFER_SRC_BIT is what lets the main-menu panorama be pulled out
+            // of the backbuffer with glCopyTexSubImage2D (GuiMainMenu copies the
+            // 256x256 region into backgroundTexture seven times per frame). It
+            // must be requested only when the surface actually supports it -
+            // vkCreateSwapchainKHR rejects any usage bit outside
+            // supportedUsageFlags.
+            int usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            this.hasTransferSrc = (surfaceProperties.capabilities.supportedUsageFlags()
+                    & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+            if (this.hasTransferSrc)
+                usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            else
+                VulkanMod.LOGGER.warn("Surface does not support TRANSFER_SRC on swapchain images; "
+                        + "the main-menu panorama copy will be skipped");
+            createInfo.imageUsage(usage);
 
             Queue.QueueFamilyIndices indices = Queue.getQueueFamilies();
 
@@ -350,6 +366,11 @@ public class SwapChain extends Framebuffer {
             }
             return VK_PRESENT_MODE_FIFO_KHR; // If None of the request modes exist/are supported by Driver
         }
+    }
+
+    /** True when swapchain images carry VK_IMAGE_USAGE_TRANSFER_SRC_BIT. */
+    public boolean hasTransferSrc() {
+        return this.hasTransferSrc;
     }
 
     public boolean isVsync() {

@@ -1089,6 +1089,8 @@ public class GlStateManagerMixin {
    public static void glCopyTexSubImage2D(
       int p_187443_0_, int p_187443_1_, int p_187443_2_, int p_187443_3_, int p_187443_4_, int p_187443_5_, int p_187443_6_, int p_187443_7_
    ) {
+      com.yuhan123.vulkanmod.vulkan.texture.ImageUtil.copyTexSubImage2D(
+         p_187443_0_, p_187443_1_, p_187443_2_, p_187443_3_, p_187443_4_, p_187443_5_, p_187443_6_, p_187443_7_);
    }
 
    @Overwrite

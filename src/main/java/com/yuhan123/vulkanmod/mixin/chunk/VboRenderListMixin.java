@@ -29,7 +29,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import java.lang.reflect.Field;
+import com.yuhan123.vulkanmod.mixin.vertex.VertexBufferAccessor;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
@@ -89,15 +89,41 @@ public class VboRenderListMixin {
     private static final int AREA_MAX_BYTES = 48 * 1024 * 1024;
     private static final int LAYER_COUNT = 4; // BlockRenderLayer.values().length
 
-    private static final boolean BATCH_WANTED = VulkanModConfig.getBool("TERRAIN_BATCH", false);
-    private static boolean batchActive = BATCH_WANTED;
+    // Terrain batching is gated by TERRAIN_BATCH. These used to be frozen
+    // `static final` fields evaluated when this mixin class is first loaded by
+    // Mixin - which happens BEFORE VulkanMod.preInit() calls
+    // VulkanModConfig.load(<real mod config dir>). On a remapped export the
+    // class-load-time lookup therefore resolved against a cwd-relative config
+    // (or none) instead of the real FML config directory, so dev and export
+    // could disagree and the batch path silently stayed OFF in export. We now
+    // resolve them lazily on the first gameplay frame (after preInit) and keep
+    // TERRAIN_BATCH defaulting ON so a fresh or partial config still batches.
+    private static boolean BATCH_WANTED;
+    private static boolean batchActive = false;
     private static boolean initTried;
+    private static boolean configResolved;
+
+    private static void resolveConfig() {
+        if (configResolved) {
+            return;
+        }
+        configResolved = true;
+        BATCH_WANTED   = VulkanModConfig.getBool("TERRAIN_BATCH", true);
+        TRANS_VANILLA  = VulkanModConfig.getBool("TB_TRANS_VANILLA", false);
+        REGION_WANTED  = VulkanModConfig.getBool("TERRAIN_REGION", false);
+        AREA_WANTED    = VulkanModConfig.getBool("TERRAIN_AREA", false);
+        batchActive    = BATCH_WANTED;
+        VulkanMod.LOGGER.info("[VKPROF] TBATCH config resolved from {}: TERRAIN_BATCH={} (active={}) TB_TRANS_VANILLA={} TERRAIN_REGION={} TERRAIN_AREA={}",
+                VulkanModConfig.file(),
+                VulkanModConfig.get("TERRAIN_BATCH"),
+                Boolean.valueOf(batchActive), Boolean.valueOf(TRANS_VANILLA),
+                Boolean.valueOf(REGION_WANTED), Boolean.valueOf(AREA_WANTED));
+    }
     // ARM B toggle (paired A/B, TB_TRANS_VANILLA=1): force TRANSLUCENT
     // back onto the vanilla per-section path, reproducing the pre-DrawBuffers
     // behaviour so the single-MVP translucent path can be measured against it on
     // the SAME scene. Default OFF (translucent goes through the shared-area path).
-    private static final boolean TRANS_VANILLA =
-            VulkanModConfig.getBool("TB_TRANS_VANILLA", false);
+    private static boolean TRANS_VANILLA;
 
     // Second-knife toggle (TERRAIN_REGION=1): a persistent per-section
     // registry lets the steady-state per-frame collection loop skip the native
@@ -107,8 +133,7 @@ public class VboRenderListMixin {
     // the area offset is recovered from secCache with two HashMap.gets instead
     // of a native GL call + reflection. Draws/geometry are unchanged, so the
     // only observable effect is lower camWorld. Default OFF (current proven path).
-    private static final boolean REGION_WANTED =
-            VulkanModConfig.getBool("TERRAIN_REGION", false);
+    private static boolean REGION_WANTED;
     // Second-knife registry: packed (chunkX,chunkY,chunkZ,layer) -> {pid, vc, _, x, y, z, _}.
     // Keyed by POSITION (not RenderChunk) so it survives ChunkRenderContainer
     // recreation between frames - the original RenderChunk-keyed map never hit
@@ -130,8 +155,7 @@ public class VboRenderListMixin {
     // emitted as ONE vkCmdDrawMultiIndexedEXT instead of a per-section draw. The
     // per-frame Java traversal of every visible section is skipped in steady state
     // (cached sections are flagged alive with a single HashMap.get). Default OFF.
-    private static final boolean AREA_WANTED =
-            VulkanModConfig.getBool("TERRAIN_AREA", false);
+    private static boolean AREA_WANTED;
     private static final int AREA_SHIFT = 5; // 32-block (2-chunk) areas -> a few dozen areas
     // stable per-layer: posKey(x,y,z,layer) -> {offset, vc, x, y, z, areaId, lastSeen, pid}
     private static final Map[] areaSec = new HashMap[LAYER_COUNT];
@@ -230,23 +254,14 @@ public class VboRenderListMixin {
         return calls;
     }
 
-    // vanilla inherited fields (ChunkRenderContainer) via reflection: @Shadow on
-    // superclass members is not guaranteed across Mixin versions, this is.
-    private static Field fRenderChunks;
-    private static Field fViewEntityX;
-    private static Field fViewEntityY;
-    private static Field fViewEntityZ;
-    private static Field fVboCount;
-
-    @SuppressWarnings("unchecked")
-    private static List<RenderChunk> renderChunks(Object self) throws Exception {
-        if (fRenderChunks == null) {
-            fRenderChunks = Class.forName("net.minecraft.client.renderer.ChunkRenderContainer")
-                    .getDeclaredField("renderChunks");
-            fRenderChunks.setAccessible(true);
-        }
-        return (List<RenderChunk>) fRenderChunks.get(self);
-    }
+    // Inherited fields of net.minecraft.client.renderer.ChunkRenderContainer
+    // (VboRenderList's superclass) are read via ChunkRenderContainerAccessor (an
+    // @Accessor interface mixin). The refmap maps the MCP names to SRG, so the
+    // batch path works in both the dev (deobfuscated) and the remapped export
+    // environments. A raw getDeclaredField("viewEntityX"|"renderChunks") failed
+    // with NoSuchFieldException in the SRG export and disabled the whole batch;
+    // @Shadow on superclass members also produced no refmap entry in this build,
+    // so the @Accessor interface is the reliable choice.
 
     private static long packKey(int x, int y, int z, int layer) {
         // stable per-section key; signed coords are recomputed identically so
@@ -256,6 +271,7 @@ public class VboRenderListMixin {
 
     @Inject(method = "renderChunkLayer", at = @At("HEAD"), cancellable = true)
     private void vulkanmod$batchChunkLayer(BlockRenderLayer layer, CallbackInfo ci) {
+        resolveConfig();
         if (!batchActive) {
             return; // vanilla path untouched
         }
@@ -362,20 +378,7 @@ public class VboRenderListMixin {
             areaLastFull[i] = 0L;
         }
         autoIdx = new AutoIndexBuffer(4096, 7 /* GL_QUADS */);
-        initViewEntityFields();
         VKProf.info("[VKPROF] TBATCH initialized: single-draw mode, per-layer zeroed DEVICE-LOCAL area (VULKANMOD_TERRAIN_BATCH=1)");
-    }
-
-    private static void initViewEntityFields() throws Exception {
-        if (fViewEntityX == null) {
-            final Class<?> cc = Class.forName("net.minecraft.client.renderer.ChunkRenderContainer");
-            fViewEntityX = cc.getDeclaredField("viewEntityX");
-            fViewEntityY = cc.getDeclaredField("viewEntityY");
-            fViewEntityZ = cc.getDeclaredField("viewEntityZ");
-            fViewEntityX.setAccessible(true);
-            fViewEntityY.setAccessible(true);
-            fViewEntityZ.setAccessible(true);
-        }
     }
 
     /**
@@ -413,12 +416,8 @@ public class VboRenderListMixin {
 
     private static int safeCount(VertexBuffer vbo) {
         try {
-            if (fVboCount == null) {
-                fVboCount = VertexBuffer.class.getDeclaredField("count");
-                fVboCount.setAccessible(true);
-            }
-            return fVboCount.getInt(vbo);
-        } catch (Exception ex) {
+            return ((VertexBufferAccessor) vbo).getCount();
+        } catch (Throwable ex) {
             return 0;
         }
     }
@@ -543,7 +542,7 @@ public class VboRenderListMixin {
      */
     @SuppressWarnings("unchecked")
     private boolean drawBatchedArea(BlockRenderLayer layer) throws Exception {
-        final List<RenderChunk> chunks = renderChunks(this);
+        final List<RenderChunk> chunks = ((ChunkRenderContainerAccessor) this).getRenderChunks();
         if (chunks.isEmpty()) {
             return false;
         }
@@ -689,9 +688,9 @@ public class VboRenderListMixin {
         }
         com.yuhan123.vulkanmod.vulkan.VRenderSystem.alphaTest = layer != BlockRenderLayer.SOLID;
         com.yuhan123.vulkanmod.vulkan.VRenderSystem.depthMask = !translucent;
-        final double vx = fViewEntityX.getDouble(this);
-        final double vy = fViewEntityY.getDouble(this);
-        final double vz = fViewEntityZ.getDouble(this);
+        final double vx = ((ChunkRenderContainerAccessor) this).getViewEntityX();
+        final double vy = ((ChunkRenderContainerAccessor) this).getViewEntityY();
+        final double vz = ((ChunkRenderContainerAccessor) this).getViewEntityZ();
         com.yuhan123.vulkanmod.vulkan.VRenderSystem.setChunkOffset((float) -vx, (float) -vy, (float) -vz);
         GlStateManager.pushMatrix();
         GlStateManager.translate((float) -vx, (float) -vy, (float) -vz);
@@ -734,7 +733,7 @@ public class VboRenderListMixin {
      *         to draw (vanilla then no-ops too).
      */
     private boolean drawBatched(BlockRenderLayer layer) throws Exception {
-        final List<RenderChunk> chunks = renderChunks(this);
+        final List<RenderChunk> chunks = ((ChunkRenderContainerAccessor) this).getRenderChunks();
         if (chunks.isEmpty()) {
             return false;
         }
@@ -837,18 +836,10 @@ public class VboRenderListMixin {
                     if (data != null) {
                         vc = data.limit() / STRIDE;
                     } else {
-                        if (fVboCount == null) {
-                            fVboCount = VertexBuffer.class.getDeclaredField("count");
-                            fVboCount.setAccessible(true);
-                        }
-                        vc = fVboCount.getInt(vbo);
+                        vc = safeCount(vbo);
                     }
                 } else if (data != null) {
-                    if (fVboCount == null) {
-                        fVboCount = VertexBuffer.class.getDeclaredField("count");
-                        fVboCount.setAccessible(true);
-                    }
-                    vc = fVboCount.getInt(vbo);
+                    vc = safeCount(vbo);
                     pid = -(long) i - 1; // non-cacheable marker (matches original)
                 } else {
                     continue; // vanilla has nothing to draw for this section either
@@ -1035,9 +1026,9 @@ public class VboRenderListMixin {
             order[i] = i;
         }
         if (layer == BlockRenderLayer.TRANSLUCENT) {
-            final double vx = fViewEntityX.getDouble(this);
-            final double vy = fViewEntityY.getDouble(this);
-            final double vz = fViewEntityZ.getDouble(this);
+            final double vx = ((ChunkRenderContainerAccessor) this).getViewEntityX();
+            final double vy = ((ChunkRenderContainerAccessor) this).getViewEntityY();
+            final double vz = ((ChunkRenderContainerAccessor) this).getViewEntityZ();
             // insertion sort by squared distance DESCENDING (far first)
             for (int i = 1; i < n; i++) {
                 final int cur = order[i];
@@ -1115,9 +1106,9 @@ public class VboRenderListMixin {
         // translate(-viewEntity) - exactly vanilla's per-section transform with
         // the per-chunk constant folded into the vertices. popMatrix() restores
         // the entry modelview for the rest of the frame (entities, etc.).
-        final double vx = fViewEntityX.getDouble(this);
-        final double vy = fViewEntityY.getDouble(this);
-        final double vz = fViewEntityZ.getDouble(this);
+        final double vx = ((ChunkRenderContainerAccessor) this).getViewEntityX();
+        final double vy = ((ChunkRenderContainerAccessor) this).getViewEntityY();
+        final double vz = ((ChunkRenderContainerAccessor) this).getViewEntityZ();
         // Publish the WORLD-SPACE model translation this draw applies (see
         // VRenderSystem.chunkOffset). The batched vertices already carry WORLD
         // coordinates (each section's origin is baked in), so the only thing

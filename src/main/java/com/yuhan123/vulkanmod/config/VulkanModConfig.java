@@ -41,6 +41,7 @@ public final class VulkanModConfig {
     private static final Map<String, String> VALUES = new HashMap<String, String>();
     private static volatile boolean loaded = false;
     private static File resolvedFile = null;
+    private static boolean legacyUsed = false;
 
     /**
      * Per-frame VKPROF output. Off by default: it is a debug aid that floods the
@@ -89,16 +90,23 @@ public final class VulkanModConfig {
         resolvedFile = null;
 
         File f = null;
-        if (modConfigDir != null) {
-            f = new File(modConfigDir, FILE_NAME);
-        }
-        if (f == null || !f.isFile()) {
-            f = new File("config" + File.separator + FILE_NAME);
-        }
-        if (!f.isFile()) {
-            f = new File(FILE_NAME);
-        }
-        if (!f.isFile()) {
+        legacyUsed = false;
+        File cand;
+        // Canonical name first, then the legacy "vulkanmod.properties" spelling so
+        // configs carried over from before the mod was renamed still take effect.
+        if (modConfigDir != null && (cand = new File(modConfigDir, FILE_NAME)).isFile()) {
+            f = cand;
+        } else if ((cand = new File("config" + File.separator + FILE_NAME)).isFile()) {
+            f = cand;
+        } else if ((cand = new File(FILE_NAME)).isFile()) {
+            f = cand;
+        } else if (modConfigDir != null && (cand = new File(modConfigDir, "vulkanmod.properties")).isFile()) {
+            f = cand; legacyUsed = true;
+        } else if ((cand = new File("config" + File.separator + "vulkanmod.properties")).isFile()) {
+            f = cand; legacyUsed = true;
+        } else if ((cand = new File("vulkanmod.properties")).isFile()) {
+            f = cand; legacyUsed = true;
+        } else {
             f = new File("config" + File.separator + "vulkanmod.cfg");
         }
 
@@ -121,6 +129,8 @@ public final class VulkanModConfig {
                     }
                 }
                 resolvedFile = f;
+                VulkanMod.LOGGER.info("[config] loaded switches from {} (legacyName={})",
+                        f.getPath(), Boolean.valueOf(legacyUsed));
             } catch (Throwable t) {
                 VulkanMod.LOGGER.warn("[config] could not read {}: {}", f.getPath(), t);
             } finally {

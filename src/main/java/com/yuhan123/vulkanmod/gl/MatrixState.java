@@ -1,5 +1,6 @@
 package com.yuhan123.vulkanmod.gl;
 
+import com.yuhan123.vulkanmod.VulkanMod;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import org.joml.Matrix4f;
@@ -225,7 +226,22 @@ public class MatrixState {
         // The texture matrix (lightmap) is not consumed by the Vulkan shaders
         VRenderSystem.applyModelViewMatrix(modelViewStack.peek());
         VRenderSystem.applyProjectionMatrix(projectionStack.peek());
+
+        // TEMP DIAGNOSTIC (remove): report the projection the FIRST draw after
+        // the panorama's gluPerspective actually uses, so "the perspective never
+        // landed" can be separated from "the faces are not being drawn".
+        if (traceNextProjection) {
+            traceNextProjection = false;
+            Matrix4f m = projectionStack.peek();
+            VulkanMod.LOGGER.info(
+                    "[VKPROF] projection at first draw after panorama setup: "
+                            + "m00={} m11={} m22={} m23={} m32={} m33={}",
+                    m.m00(), m.m11(), m.m22(), m.m23(), m.m32(), m.m33());
+        }
     }
+
+    /** TEMP DIAGNOSTIC (remove). */
+    public static boolean traceNextProjection = false;
 
     /**
      * Marks the MVP stale. The matrices themselves are copied by
