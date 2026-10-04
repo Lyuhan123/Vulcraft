@@ -259,10 +259,10 @@ public class MatrixState {
         if (traceNextProjection) {
             traceNextProjection = false;
             Matrix4f m = projectionStack.peek();
-            VulkanMod.LOGGER.info(
-                    "[VKPROF] projection at first draw after panorama setup: "
-                            + "m00={} m11={} m22={} m23={} m32={} m33={}",
-                    m.m00(), m.m11(), m.m22(), m.m23(), m.m32(), m.m33());
+//            VulkanMod.LOGGER.info(
+//                    "[VKPROF] projection at first draw after panorama setup: "
+//                            + "m00={} m11={} m22={} m23={} m32={} m33={}",
+//                    m.m00(), m.m11(), m.m22(), m.m23(), m.m32(), m.m33());
         }
     }
 

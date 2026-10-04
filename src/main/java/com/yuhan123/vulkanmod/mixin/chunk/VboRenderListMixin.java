@@ -246,7 +246,7 @@ public class VboRenderListMixin {
             // info position stays 0, limit = cnt: LWJGL reads cnt sub-draws.
             // pVertexBuffer = null: per-draw vertex offset comes from the struct's
             // vertexOffset field (the area buffer is bound once at 0).
-            org.lwjgl.vulkan.EXTMultiDraw.vkCmdDrawMultiIndexedEXT(
+            EXTMultiDraw.vkCmdDrawMultiIndexedEXT(
                     cb, info, 1, 0, VkMultiDrawIndexedInfoEXT.SIZEOF, (java.nio.IntBuffer) null);
             FrameProfiler.addCmdCount(FrameProfiler.CMD_DRAW_MULTI_INDEXED);
             calls++;
@@ -289,7 +289,7 @@ public class VboRenderListMixin {
                 initTried = true;
                 initBatch();
                 VKProf.info("[VKPROF] INDIRECT mode={} (0=coalesced,1=per-section,2=multi-draw); VK_EXT_multi_draw available={}; TERRAIN_REGION={} (second-knife); TERRAIN_AREA={} (third-knife area-grouped)",
-                        indirectMode(), com.yuhan123.vulkanmod.vulkan.device.DeviceManager.MULTI_DRAW_AVAILABLE, REGION_WANTED, AREA_WANTED);
+                        indirectMode(), DeviceManager.MULTI_DRAW_AVAILABLE, REGION_WANTED, AREA_WANTED);
             }
 
             if (AREA_WANTED) {
@@ -512,7 +512,7 @@ public class VboRenderListMixin {
                 d[j + 1] = curD;
             }
         }
-        if (com.yuhan123.vulkanmod.vulkan.device.DeviceManager.MULTI_DRAW_AVAILABLE) {
+        if (DeviceManager.MULTI_DRAW_AVAILABLE) {
             final VkMultiDrawIndexedInfoEXT.Buffer info = VkMultiDrawIndexedInfoEXT.calloc(cnt, stack);
             for (int k = 0; k < cnt; k++) {
                 final int s = idx[k];
@@ -706,7 +706,7 @@ public class VboRenderListMixin {
             final IndexBuffer ib = autoIdx.getIndexBuffer();
             Renderer.getDrawer().bindIndexBuffer(cb, ib, ib.indexType.value);
             if (!noDraw) {
-                for (java.util.Map.Entry<Long, List<Long>> en : a2p.entrySet()) {
+                for (Map.Entry<Long, List<Long>> en : a2p.entrySet()) {
                     emitArea(stack, cb, layerArea, cache, en.getValue(), frame, translucent, vx, vy, vz);
                 }
             }
@@ -1222,7 +1222,7 @@ public class VboRenderListMixin {
                     final int vc = (int) s[2];
                     final int idxCount = oneQuadOnly ? 6 : (int) ((long) vc / 4L) * 6;
                     if (idxCount <= 0) continue;
-                    com.yuhan123.vulkanmod.vulkan.Renderer.getInstance().writeGpuDrawTimestamp(cb);
+                    Renderer.getInstance().writeGpuDrawTimestamp(cb);
                     org.lwjgl.vulkan.VK10.vkCmdDrawIndexed(cb, idxCount, 1, 0, startVtx, 0);
                     FrameProfiler.addCmdCount(FrameProfiler.CMD_DRAW_INDEXED);
                     runs++;
@@ -1252,7 +1252,7 @@ public class VboRenderListMixin {
                         // geometry + GPU clip explosion).
                         final int runQuads = (runEndVtx - runStartVtx) / 4;
                         final int idxCount = oneQuadOnly ? 6 : runQuads * 6;
-                        com.yuhan123.vulkanmod.vulkan.Renderer.getInstance().writeGpuDrawTimestamp(cb);
+                        Renderer.getInstance().writeGpuDrawTimestamp(cb);
                         org.lwjgl.vulkan.VK10.vkCmdDrawIndexed(cb, idxCount, 1,
                                 0, runStartVtx, 0);
                         FrameProfiler.addCmdCount(FrameProfiler.CMD_DRAW_INDEXED);
@@ -1272,7 +1272,7 @@ public class VboRenderListMixin {
                         final int vc = (int) s[2];
                         final int idxCount = oneQuadOnly ? 6 : (int) ((long) vc / 4L) * 6;
                         if (idxCount <= 0) continue;
-                        com.yuhan123.vulkanmod.vulkan.Renderer.getInstance().writeGpuDrawTimestamp(cb);
+                        Renderer.getInstance().writeGpuDrawTimestamp(cb);
                         org.lwjgl.vulkan.VK10.vkCmdDrawIndexed(cb, idxCount, 1, 0, startVtx, 0);
                         FrameProfiler.addCmdCount(FrameProfiler.CMD_DRAW_INDEXED);
                         runs++;

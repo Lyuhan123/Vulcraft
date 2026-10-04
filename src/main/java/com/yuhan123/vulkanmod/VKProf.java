@@ -20,17 +20,17 @@ public final class VKProf {
     }
 
     public static void info(String message, Object... args) {
-        if (!VulkanModConfig.profiling()) {
-            return;
-        }
-        VulkanMod.LOGGER.info(message, args);
+//        if (!VulkanModConfig.profiling()) {
+//            return;
+//        }
+//        VulkanMod.LOGGER.info(message, args);
     }
 
     public static void warn(String message, Object... args) {
-        if (!VulkanModConfig.profiling()) {
-            return;
-        }
-        VulkanMod.LOGGER.warn(message, args);
+//        if (!VulkanModConfig.profiling()) {
+//            return;
+//        }
+//        VulkanMod.LOGGER.warn(message, args);
     }
 
     /**
@@ -38,6 +38,6 @@ public final class VKProf {
      * ended up permanently disabled without anyone noticing.
      */
     public static void error(String message, Object... args) {
-        VulkanMod.LOGGER.error(message, args);
+//        VulkanMod.LOGGER.error(message, args);
     }
 }

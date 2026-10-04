@@ -167,8 +167,8 @@ public abstract class GuiMainMenuMixin extends GuiScreen {
             at = @At(value = "INVOKE", target = "Lorg/lwjgl/util/glu/Project;gluPerspective(FFFF)V"),
             remap = false)
     private static void vulkanmod$panoramaPerspective(float fovy, float aspect, float zNear, float zFar) {
-        VulkanMod.LOGGER.info("[VKPROF] panoramaPerspective fired fovy={} aspect={} near={} far={}",
-                fovy, aspect, zNear, zFar);
+//        VulkanMod.LOGGER.info("[VKPROF] panoramaPerspective fired fovy={} aspect={} near={} far={}",
+//                fovy, aspect, zNear, zFar);
         MatrixState.perspective(fovy, aspect, zNear, zFar);
         MatrixState.traceNextProjection = true;
     }
