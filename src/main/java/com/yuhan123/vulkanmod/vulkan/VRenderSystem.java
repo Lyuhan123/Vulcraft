@@ -227,10 +227,22 @@ public abstract class VRenderSystem {
         lightmapCoord.putFloat(4, v);
         lightmapCoord.putFloat(8, 0.0f);
         lightmapCoord.putFloat(12, 1.0f);
+        // TEMP DIAGNOSTIC: is the per-entity lightmap coordinate ever published
+        // with a real value, or does it stay pinned at the full-bright (240,240)?
+        // NOTE: VKProf.info() is a no-op (its body is commented out), so this must
+        // go straight to the mod logger or it prints nothing.
+        if (lmLogs < 48) {
+            ++lmLogs;
+            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(
+                    String.format("[VKPROF] SETLM #%d (%.1f,%.1f)", lmLogs, u, v));
+        }
     }
 
     /** TEMP DIAGNOSTIC: records setLightmapTextureCoords calls issued after GUI item rendering begins. */
     private static int guiSetLmLogs;
+
+    /** TEMP DIAGNOSTIC: bounded log of every setLightmapCoord call (see setLightmapCoord). */
+    private static int lmLogs;
 
     public static void logGuiSetLm(float u, float v) {
         if (guiSetLmLogs < 16) {

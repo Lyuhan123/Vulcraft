@@ -113,6 +113,31 @@ public class GlStateManagerMixin {
       VkGlTexture.bindTexture(i);
    }
 
+   /**
+    * Route the active-texture-unit switch into the Vulkan texture selector.
+    *
+    * <p>Vanilla 1.12.2 binds the lightmap through
+    * {@code EntityRenderer.enableLightmap()}:
+    * {@code GlStateManager.setActiveTexture(OpenGlHelper.lightmapTexUnit)} followed
+    * by {@code GlStateManager.bindTexture(lightmapId)} - it uses
+    * <em>GlStateManager</em>'s setter, not {@code OpenGlHelper}'s (which was the
+    * only one hooked). Left unhooked, this ran its vanilla body, which just calls
+    * {@code GL13.glActiveTexture} against a GL context that does not exist under
+    * Vulkan, so the mod's own {@code activeTexture} never moved off 0.
+    *
+    * <p>Consequence: {@code bindTexture()} put the lightmap into slot 0 and, because
+    * {@code activeTexture != 1}, never called
+    * {@code VTextureSelector.setLightTexture()}. Slot 2 (Sampler2, the lightmap
+    * sampler) stayed empty, so {@code bindShaderTextures} fell back to the white
+    * texture and {@code color.rgb *= texture(Sampler2, ...)} multiplied by white -
+    * every entity rendered at full daylight brightness regardless of its real
+    * lightmap coordinate.
+    */
+   @Overwrite(remap = true)
+   public static void setActiveTexture(int i) {
+      VkGlTexture.activeTexture(i);
+   }
+
    @Overwrite(remap = true)
    public static void disableBlend() {
       VRenderSystem.disableBlend();

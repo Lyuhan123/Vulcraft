@@ -216,12 +216,25 @@ public class VkGlTexture {
 
         VulkanImage vulkanImage = boundTexture.vulkanImage;
         if (vulkanImage != null) {
-            VTextureSelector.bindTexture(activeTexture, vulkanImage);
-
             // 1.12.2 binds the lightmap at GL_TEXTURE1 (OpenGlHelper.lightmapTexUnit = 33985),
-            // but the block/item shaders sample it from slot 2 (Sampler2 -> imageIdx 2).
+            // but the block/item/entity shaders all sample it from slot 2 (Sampler2 ->
+            // imageIdx 2). Publish it there so those shaders get real lighting.
             if (activeTexture == 1) {
                 VTextureSelector.setLightTexture(vulkanImage);
+            }
+
+            // Only publish the image into the selector's slot array for units that are
+            // real shader samplers. GL_TEXTURE2 (33986) is the vanilla brightness / FX
+            // overlay driven by RenderLivingBase.setBrightness / unsetBrightness; this
+            // port reproduces that effect through the EntityFlash UBO + ColorModulator
+            // rather than a shader sampler, so binding it would write straight into
+            // slot 2 - the lightmap sampler - and clobber world lighting for every
+            // later entity in the frame. That was the "attack one mob -> all mobs go
+            // full bright" defect: an attacked mob's setBrightness() binds the white
+            // TEXTURE_BRIGHTNESS onto unit 2, overwriting the lightmap, and
+            // unsetBrightness() never restores it.
+            if (activeTexture != 2) {
+                VTextureSelector.bindTexture(activeTexture, vulkanImage);
             }
         } else {
         }

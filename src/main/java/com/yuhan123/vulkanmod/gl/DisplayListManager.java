@@ -79,6 +79,9 @@ public class DisplayListManager {
     private static final Map<Integer, DisplayList> displayLists = new HashMap<>();
     private static final Map<Integer, Integer> glToInternal = new HashMap<>();
     private static int recordingInternal = -1;
+
+    /** TEMP DIAGNOSTIC: bounded log of the lightmap coordinate at entity display-list replay. */
+    private static int entLmLogs = 0;
     private static boolean recording = false;
     private static int nextInternalId = 1;
     private static final Matrix4f recordingStartMV = new Matrix4f();
@@ -213,6 +216,15 @@ public class DisplayListManager {
             FrameProfiler.addDisplayListNanos(__t);
 
             if (entDl) {
+                // TEMP DIAGNOSTIC: what lightmap coordinate will the entity shader
+                // actually sample for this replayed entity draw? (240,240) is the
+                // full-bright corner and means the coordinate never got published.
+                if (entLmLogs < 48) {
+                    ++entLmLogs;
+                    // VKProf.info() is a no-op (body commented out) - log directly.
+                    com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(String.format("[VKPROF] ENTLM #%d (%.1f,%.1f)",
+                            entLmLogs, VRenderSystem.getLightmapU(), VRenderSystem.getLightmapV()));
+                }
                 FrameProfiler.onEntityDlReplay(System.nanoTime() - __t0);
             }
         }

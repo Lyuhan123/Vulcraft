@@ -997,30 +997,60 @@ public class ShaderInstance {
 
     public void setupUniformSuppliers(UBO ubo) {
         for (Uniform vUniform : ubo.getUniforms()) {
-            VkUniform uniform = this.uniformMap.get(vUniform.getName());
-
-            Supplier<MappedBuffer> supplier;
-            ByteBuffer byteBuffer;
-
-            if (uniform == null) {
-                VulkanMod.LOGGER.error(String.format("Error: field %s not present in uniform map", vUniform.getName()));
-
-                int size = vUniform.getSize();
-                byteBuffer = MemoryUtil.memAlloc(size * 4);
-            } else if (uniform.getType() <= 3) {
-                byteBuffer = MemoryUtil.memByteBuffer(uniform.getIntBuffer());
-            } else if (uniform.getType() <= 10) {
-                byteBuffer = MemoryUtil.memByteBuffer(uniform.getFloatBuffer());
-            } else {
-                throw new RuntimeException("out of bounds value for uniform " + uniform);
-            }
-
-
-            MappedBuffer mappedBuffer = MappedBuffer.createFromBuffer(byteBuffer);
-            supplier = () -> mappedBuffer;
-
-            vUniform.setSupplier(supplier);
+            vUniform.setSupplier(this.resolveUniformSupplier(vUniform.getInfo()));
         }
+    }
+
+    /**
+     * Resolves the byte source for one UBO field. Single implementation shared by
+     * BOTH shader build paths ({@code createLegacyShader} via setupUniformSuppliers,
+     * and {@code createPipeline} via the builder's supplier getter), so neither can
+     * silently bind a stale JSON default where the live global is required.
+     *
+     * <p>1. A field the CPU updates live every frame (registered in {@code Uniforms})
+     * MUST read that live buffer, not the shader's own JSON-default VkUniform.
+     * LightmapCoord and EntityFlash are the two that matter: their JSON defaults
+     * are (240,240) - the full-bright corner of the 16x16 lightmap - and (0,0,0,0).
+     * Binding the JSON buffer therefore lit every entity as if it stood in full
+     * daylight (the "bright, not red" report) and made the hurt/burn flash
+     * permanently invisible.
+     *
+     * <p>2. Otherwise the shader's own VkUniform buffer (its JSON default, refreshed
+     * by setDefaultUniforms on the paths that call it).
+     */
+    private Supplier<MappedBuffer> resolveUniformSupplier(Uniform.Info info) {
+        final String name = info.name;
+
+        final Supplier<MappedBuffer> global = com.yuhan123.vulkanmod.vulkan.shader.Uniforms
+                .getUniformSupplier(info.type, name);
+        if (global != null) {
+            return global;
+        }
+
+        VkUniform uniform = this.uniformMap.get(name);
+
+        ByteBuffer byteBuffer;
+
+        if (uniform == null) {
+            VulkanMod.LOGGER.error(String.format("Error: field %s not present in uniform map", name));
+
+            int size = vUniformSize(info);
+            byteBuffer = MemoryUtil.memAlloc(size * 4);
+        } else if (uniform.getType() <= 3) {
+            byteBuffer = MemoryUtil.memByteBuffer(uniform.getIntBuffer());
+        } else if (uniform.getType() <= 10) {
+            byteBuffer = MemoryUtil.memByteBuffer(uniform.getFloatBuffer());
+        } else {
+            throw new RuntimeException("out of bounds value for uniform " + uniform);
+        }
+
+        MappedBuffer mappedBuffer = MappedBuffer.createFromBuffer(byteBuffer);
+        return () -> mappedBuffer;
+    }
+
+    /** Field size in floats for a UBO field declaration. */
+    private static int vUniformSize(Uniform.Info info) {
+        return info.size;
     }
 
 
@@ -1069,7 +1099,7 @@ public class ShaderInstance {
 
     private void createPipeline(String configName, VertexFormat format, JsonObject config) {
         Pipeline.Builder builder = new Pipeline.Builder(format, configName);
-        builder.setUniformSupplierGetter(info -> this.getUniformSupplier(info.name));
+        builder.setUniformSupplierGetter(this::resolveUniformSupplier);
 
         builder.parseBindings(config);
 
