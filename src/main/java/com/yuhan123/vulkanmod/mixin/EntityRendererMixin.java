@@ -1,6 +1,7 @@
 package com.yuhan123.vulkanmod.mixin;
 
 import com.yuhan123.vulkanmod.gl.MatrixState;
+import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import net.minecraft.client.renderer.EntityRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -66,6 +67,10 @@ public class EntityRendererMixin {
     @Inject(method = "disableLightmap", at = @At("HEAD"))
     private void vulkanmod$resetTextureAfterLightmap(CallbackInfo ci) {
         MatrixState.resetTextureMatrix();
+        // Vanilla's lightmap unit is now OFF: everything drawn from here on is
+        // unlit in vanilla, so the shaders must stop consuming the world
+        // coordinate. See VRenderSystem.lightmapEnabled.
+        VRenderSystem.lightmapEnabled = false;
     }
 
     /**
@@ -92,5 +97,31 @@ public class EntityRendererMixin {
     @Inject(method = "enableLightmap", at = @At("RETURN"))
     private void vulkanmod$resetTextureBeforeLightmap(CallbackInfo ci) {
         MatrixState.resetTextureMatrix();
+        VRenderSystem.lightmapEnabled = true;
+    }
+
+    /**
+     * The world pass is always the lit case.
+     *
+     * <p>Explicit, because vanilla never calls {@code enableLightmap()} before the
+     * entity pass - the unit is simply still on from the previous frame. Without
+     * this the flag would still be {@code false} from the GUI at the end of the
+     * last frame and every entity, arrow and dropped item would render full-bright.
+     */
+    @Inject(method = "renderWorldPass", at = @At("HEAD"))
+    private void vulkanmod$worldPassLightsOn(CallbackInfo ci) {
+        VRenderSystem.lightmapEnabled = true;
+    }
+
+    /**
+     * Everything after the world pass is GUI/HUD, which vanilla draws unlit.
+     *
+     * <p>Guaranteed here rather than relying on the last {@code
+     * disableLightmap()} inside the pass, so a version/config that skips the
+     * particle, hand or rain sections cannot leak a lit state into the HUD.
+     */
+    @Inject(method = "renderWorldPass", at = @At("RETURN"))
+    private void vulkanmod$worldPassLightsOff(CallbackInfo ci) {
+        VRenderSystem.lightmapEnabled = false;
     }
 }

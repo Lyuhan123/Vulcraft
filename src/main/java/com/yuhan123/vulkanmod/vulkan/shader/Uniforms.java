@@ -63,7 +63,12 @@ public class Uniforms {
         // setDefaultUniforms(), has no callers - so LightmapCoord stayed at the
         // JSON default (240,240), which samples the full-bright corner of the
         // lightmap: every entity rendered unlit.
-        vec4f_uniformMap.put("LightmapCoord", () -> VRenderSystem.lightmapCoord);
+        // When vanilla has switched the lightmap unit off (EntityRenderer
+        // .disableLightmap - the state every GUI/HUD draw inherits), the
+        // shader must sample the full-bright corner, not the stale world
+        // coordinate. See VRenderSystem.lightmapEnabled.
+        vec4f_uniformMap.put("LightmapCoord",
+                () -> VRenderSystem.lightmapEnabled ? VRenderSystem.lightmapCoord : VRenderSystem.unlitLightmapCoord);
         // Mob hurt/burn flash colour (see VRenderSystem.setFlashColor). Without a
         // global supplier the UBO field would bind to the shader-local VkUniform,
         // which nothing writes, and the flash would stay invisible.

@@ -110,6 +110,29 @@ public abstract class VRenderSystem {
      */
     public static MappedBuffer lightmapCoord = new MappedBuffer(4 * 4);
 
+    /**
+     * Mirrors whether vanilla's lightmap texture unit is switched on.
+     *
+     * <p>1.12.2 lights everything through the fixed-function lightmap on texture
+     * unit 1, and turns that unit off for any pass that must not be lit -
+     * {@code EntityRenderer.disableLightmap()} is the switch, and it is always the
+     * last lightmap call a {@code renderWorldPass} makes, so the HUD/GUI that
+     * follows is drawn unlit in vanilla. This port samples the lightmap in the
+     * shader instead, so without this mirror every GUI draw inherited the last
+     * world entity's coordinate and went dark at night.
+     *
+     * <p>Default true: the world pass is the lit case, and a draw reach- ed before
+     * any enable/disable pair must keep its old behaviour.
+     */
+    public static boolean lightmapEnabled = true;
+
+    /**
+     * (240,240,0,1) - the full-bright corner, sampled whenever the lightmap is
+     * switched off. Kept as its own buffer so disabling never destroys the
+     * per-entity coordinate still stored in {@link #lightmapCoord}.
+     */
+    public static final MappedBuffer unlitLightmapCoord = new MappedBuffer(4 * 4);
+
     public static float alphaCutout = 0.0f;
 
     /**
@@ -159,6 +182,10 @@ public abstract class VRenderSystem {
         // Full-bright lightmap corner: a draw that never receives a lightmap
         // coordinate must look exactly as before, not be multiplied by (0,0).
         setLightmapCoord(240.0f, 240.0f);
+        unlitLightmapCoord.putFloat(0, 240.0f);
+        unlitLightmapCoord.putFloat(4, 240.0f);
+        unlitLightmapCoord.putFloat(8, 0.0f);
+        unlitLightmapCoord.putFloat(12, 1.0f);
     }
 
     /**
