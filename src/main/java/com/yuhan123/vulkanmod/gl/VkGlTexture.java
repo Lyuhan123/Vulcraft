@@ -1,6 +1,7 @@
 package com.yuhan123.vulkanmod.gl;
 
 import com.yuhan123.vulkanmod.VKProf;
+import com.yuhan123.vulkanmod.VulkanMod;
 import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import it.unimi.dsi.fastutil.ints.Int2ReferenceOpenHashMap;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
@@ -216,6 +217,17 @@ public class VkGlTexture {
 
         VulkanImage vulkanImage = boundTexture.vulkanImage;
         if (vulkanImage != null) {
+            // The ender-crystal healing beam texture is 16x256 and scrolls its V
+            // coordinate far negative over time (RenderDragon.renderCrystalBeams
+            // uses tex(f9, -(ticks + partialTicks) * 0.01)). Vanilla relies on GL's
+            // default REPEAT wrap for that scroll; this port defaults every texture
+            // to CLAMP_TO_EDGE, which would pin the beam to V=0 (alpha 0) and make
+            // it invisible. Force REPEAT on it so the soft alpha gradient wraps and
+            // shows. 16x256 is the beam's signature size; no other MC texture uses it.
+            if (boundTexture.width == 16 && boundTexture.height == 256 && boundTexture.clamp) {
+                boundTexture.clamp = false;
+                boundTexture.updateSampler();
+            }
             // 1.12.2 binds the lightmap at GL_TEXTURE1 (OpenGlHelper.lightmapTexUnit = 33985),
             // but the block/item/entity shaders all sample it from slot 2 (Sampler2 ->
             // imageIdx 2). Publish it there so those shaders get real lighting.

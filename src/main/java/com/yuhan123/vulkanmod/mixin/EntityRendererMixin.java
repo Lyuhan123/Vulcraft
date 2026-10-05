@@ -67,4 +67,30 @@ public class EntityRendererMixin {
     private void vulkanmod$resetTextureAfterLightmap(CallbackInfo ci) {
         MatrixState.resetTextureMatrix();
     }
+
+    /**
+     * Clears the shared TEXTURE matrix the instant the lightmap transform is
+     * installed, so it never leaks into the unit-0 draws that happen WHILE the
+     * lightmap is still enabled.
+     *
+     * <p>This is what the ender-crystal healing beam needs. {@code
+     * RenderDragon.renderCrystalBeams} runs from {@code doRender} -> {@code
+     * super.doRender} while the lightmap is enabled, and it draws with {@code
+     * position_tex_color}, which multiplies its UVs by this matrix. With the
+     * lightmap transform present, {@code UV' = (u/256 + 8, V/256 + 8) ~ (8, 8)}
+     * collapses the entire beam onto the texture's opaque corner pixel, so the
+     * beam renders as a solid white line that {@code enableBlend} cannot fix
+     * (the sampled alpha is 255). Resetting to identity here - before any entity
+     * draw - restores the beam's true UVs.
+     *
+     * <p>Our shaders derive lightmap coordinates arithmetically and never
+     * consume this matrix, so resetting it right after {@code enableLightmap}
+     * applies the GL-equivalent transform is safe. Forge's cloud renderer
+     * installs its own texture matrix during the cloud pass (which runs after
+     * {@code disableLightmap}), so this does not affect cloud rendering.
+     */
+    @Inject(method = "enableLightmap", at = @At("RETURN"))
+    private void vulkanmod$resetTextureBeforeLightmap(CallbackInfo ci) {
+        MatrixState.resetTextureMatrix();
+    }
 }
