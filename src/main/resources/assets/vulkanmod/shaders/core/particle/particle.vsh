@@ -26,4 +26,13 @@ void main() {
     vertexDistance = fog_distance(Position.xyz, 0);
     texCoord0 = UV0;
     vertexColor = Color;
+
+    // 1.12.2 particles carry their lightmap coordinate PER-VERTEX in UV2
+    // (Particle.renderParticle -> BufferBuilder.lightmap(j,k)), NOT through the
+    // global LightmapCoord uniform (particles never call setLightmapTextureCoords).
+    // Fold the lightmap into the vertex color here, mirroring block.vsh /
+    // terrain.vsh, so each particle is shaded by its own brightness instead of
+    // the stale global (which sat at the full-bright (240,240) corner).
+    vec2 lmCoord = (vec2(UV2) + 8.0) / 256.0;
+    vertexColor.rgb *= texture(Sampler2, lmCoord).rgb;
 }

@@ -996,6 +996,28 @@ public abstract class Pipeline {
                 return;
             }
 
+            // The discard-free variant is an early-Z optimisation that is only
+            // sound when the discard can never fire for the draws that select it
+            // (alpha-test OFF). That holds for the terrain "block" shader: the
+            // layers that run with alpha-test off (SOLID / TRANSLUCENT) sample
+            // fully opaque texels, so the `if (c.a < 0.1) discard;` never would
+            // have fired anyway and removing it is a pure early-Z win.
+            //
+            // It is NOT sound for the entity / item shaders. Their alpha-test-OFF
+            // passes are the additive overlay draws - spider & enderman glowing
+            // eyes, creeper charge, ender-dragon eyes - which re-render the WHOLE
+            // model with a mostly-transparent overlay texture and rely on the
+            // alpha test to keep only the overlay pixels (eyes). With the discard
+            // removed, every non-overlay texel is drawn too, and because
+            // ALPHA_DILATE grows each sprite's colour into its transparent texels
+            // (alpha stays 0, RGB does not), those texels now carry colour and the
+            // whole model/head gets a coloured additive film. The body pass itself
+            // runs with alpha-test ON so it keeps the discard either way; this
+            // guard only restores it for the overlay pass.
+            if (!"block".equals(name)) {
+                return;
+            }
+
             String code = fsh.replaceAll("(?m)^\\s*//.*$", "");
             if (!code.contains("discard")) {
                 return;

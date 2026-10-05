@@ -18,8 +18,10 @@ layout(location = 0) out vec4 fragColor;
 
 void main() {
     vec4 color = texture(Sampler, texCoord0) * vertexColor * ColorModulator;
+
     if (color.a < 0.1) {
         discard;
     }
+
     fragColor = color;
 }
