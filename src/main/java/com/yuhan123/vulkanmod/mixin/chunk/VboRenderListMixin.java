@@ -711,10 +711,18 @@ public class VboRenderListMixin {
                 }
             }
         }
-        if (translucent) {
-            GlStateManager.depthMask(true);
-            GlStateManager.disableBlend();
-        }
+        // IMPORTANT: do NOT reset blend / depthMask here for the TRANSLUCENT
+        // layer. Vanilla's EntityRenderer.renderWorldPass enables blend and sets
+        // depthMask(false) *before* the translucent chunk layer (~lines 1538/1539)
+        // and deliberately leaves both ON through the immediately-following
+        // renderEntities(pass1) - the ender-crystal beam and other translucent
+        // entities are drawn there and require blend ON + depth-write OFF. The
+        // vanilla cleanup that disables them runs *after* the entity pass
+        // (~lines 1564/1566), not inside renderChunkLayer. Resetting here turned
+        // the beam (texture RGB is pure white; its shape lives entirely in the
+        // alpha channel) into a solid white cone. The blend/depth state set at
+        // the top of this method for translucent (enableBlend + depthMask(false))
+        // is exactly what the entity pass expects, so we leave it untouched.
         GlStateManager.popMatrix();
         com.yuhan123.vulkanmod.vulkan.VRenderSystem.setChunkOffset(0.0f, 0.0f, 0.0f);
 
@@ -1280,12 +1288,14 @@ public class VboRenderListMixin {
                 }
             }
         }
-        if (layer == BlockRenderLayer.TRANSLUCENT) {
-            // Undo the translucent depth/blend state so later draws (entities,
-            // GUI) are not affected - the cancelled vanilla epilogue would have.
-            GlStateManager.depthMask(true);
-            GlStateManager.disableBlend();
-        }
+        // IMPORTANT: do NOT reset blend / depthMask here for the TRANSLUCENT
+        // layer. Vanilla's EntityRenderer.renderWorldPass leaves blend ON and
+        // depthMask(false) - set *before* the translucent chunk layer - in effect
+        // through the following renderEntities(pass1) (ender-crystal beam and
+        // other translucent entities need them); it only cleans up *after* that
+        // pass (~lines 1564/1566), not inside renderChunkLayer. The old "undo"
+        // here made the beam render as a solid white cone because its texture
+        // carries shape only in the alpha channel.
         // restore the entry modelview (pop the -viewEntity we pushed before apply)
         GlStateManager.popMatrix();
         // Terrain is done: drop the fog translation so any later draw that shares

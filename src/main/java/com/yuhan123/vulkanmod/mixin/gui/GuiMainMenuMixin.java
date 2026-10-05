@@ -7,10 +7,10 @@ import com.yuhan123.vulkanmod.gl.MatrixState;
 import net.minecraft.client.gui.GuiMainMenu;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.renderer.GlStateManager;
-import net.minecraft.world.WorldSettings;
 import org.lwjgl.opengl.Display;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.gen.Invoker;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyArgs;
@@ -52,95 +52,57 @@ public abstract class GuiMainMenuMixin extends GuiScreen {
 
         vulkanmod$autoJoinFired = true;
         VKProf.info("[VKPROF] auto-joining save 'New World'");
-        this.mc.launchIntegratedServer("New World", "New World", (WorldSettings) null);
+        this.mc.launchIntegratedServer("New World", "New World", (net.minecraft.world.WorldSettings) null);
     }
 
-    // DISABLED (was: @ModifyArgs forcing viewport(0,0,256,256) -> (0,0,Display.w,h)).
-    //
-    // renderSkybox draws the panorama through viewport(0,0,256,256) and then pulls
-    // exactly that region back out of the framebuffer with glCopyTexSubImage2D
-    // (0,0,256,256). The two only line up when the viewport really is the bottom
-    // left 256x256: Renderer.setViewport maps GL's bottom-left origin with
-    // `viewport.y = targetHeight - y` (480 -> rows 224..480) and
-    // copyTexSubImage2D maps it with `srcY = height - sh - y` (224) - the same
-    // rows. Forcing the viewport to full screen therefore does not "fix" the
-    // alignment, it destroys it: the panorama is painted across the whole screen
-    // while the copy still only takes the bottom-left 256x256, so backgroundTexture
-    // receives a mostly-black corner instead of the panorama and the menu loses its
-    // background (only the gradient survives). The override was written back when
-    // setViewport still used the buggy `height + y` mapping, which put the panorama
-    // in the TOP 256 rows; now that the mapping is correct it is redundant.
-//
-//    @ModifyArgs(method = "renderSkybox", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/GlStateManager;viewport(IIII)V"))
-//    public void setViewport(Args args) {
-//        args.set(2, Display.getWidth());
-//        args.set(3, Display.getHeight());
-//    }
+    /**
+     * Sharp main-menu panorama.
+     *
+     * <p>Vanilla renders the panorama through {@code viewport(0,0,256,256)}, then
+     * pulls exactly that 256x256 square out of the framebuffer with
+     * {@code glCopyTexSubImage2D(...,256,256)} into {@code backgroundTexture}
+     * (a 256x256 DynamicTexture), blurs it 7 times, and finally stretches
+     * {@code backgroundTexture} across the whole screen. That upscaled 256x256
+     * block is what reads as "too blurry".
+     *
+     * <p>We replace {@code renderSkybox} entirely: paint {@code drawPanorama}
+     * straight into the game framebuffer at native resolution (real window
+     * viewport, real aspect), and skip the 256x256 copy / blur / blit. The GUI
+     * gradient + title composite on top in {@code drawScreen} exactly as before,
+     * so the result is a crisp, full-resolution background with no black corner.
+     */
+    /**
+     * Exposes the private {@code drawPanorama} so this mixin can invoke it after
+     * cancelling the original renderSkybox. Generated on the target class; the
+     * call still runs drawPanorama with all of its own injections (the
+     * gluPerspective redirect + the X-tilt) applied.
+     */
+    @Invoker("drawPanorama")
+    public abstract void vulkanmod$drawPanorama(int mouseX, int mouseY, float partialTicks);
 
-    // TEMP DIAGNOSTIC (remove): trace the panorama pipeline for the first few
-    // menu frames so "panorama not drawn" and "drawn but not composited" can be
-    // told apart from a dump instead of guessed.
-    @Unique private static int vulkanmod$skyboxFrames = 0;
-    @Unique private static boolean vulkanmod$panoDumped = false;
-
-    // TEMP DIAGNOSTIC (remove): run only ONE of the seven blur iterations so the
-    // single-copy panorama can be looked at directly. Seven accumulating passes
-    // over a wrong copy region is what produces a uniform wash, and that makes it
-    // impossible to tell "the copy is wrong" from "the accumulation saturates".
-    @Unique private static int vulkanmod$blurCount = 0;
-
-    @Inject(method = "renderSkybox", at = @At("HEAD"))
-    private void vulkanmod$resetBlur(int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
-        vulkanmod$blurCount = 0;
+    @Inject(method = "renderSkybox", at = @At("HEAD"), cancellable = true)
+    private void vulkanmod$renderSkyboxSharp(int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
+        ci.cancel();
+        this.mc.getFramebuffer().bindFramebuffer(true);
+        GlStateManager.viewport(0, 0, Display.getWidth(), Display.getHeight());
+        this.vulkanmod$drawPanorama(mouseX, mouseY, partialTicks);
+        GlStateManager.viewport(0, 0, this.mc.displayWidth, this.mc.displayHeight);
     }
 
-    @Inject(method = "rotateAndBlurSkybox", at = @At("HEAD"), cancellable = true)
-    private void vulkanmod$limitBlur(CallbackInfo ci) {
-        if (++vulkanmod$blurCount > 1) {
-            ci.cancel();
-        }
+    /**
+     * Per the user's request: roll the captured panorama -90 degrees about the
+     * X axis so the background faces a different (sky-heavy) direction. Applied
+     * once to the shared modelview, right after vanilla's own
+     * {@code rotate(180,1,0,0)} + {@code rotate(90,0,0,1)} base orientation and
+     * before the six cube faces are drawn.
+     */
+    @Inject(method = "drawPanorama",
+            at = @At(value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/GlStateManager;rotate(FFFF)V",
+                    ordinal = 1))
+    private void vulkanmod$panoramaTilt(int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
+        GlStateManager.rotate(-90.0F, 0.0F, 0.0F, 1.0F);
     }
-
-    @Inject(method = "renderSkybox", at = @At("HEAD"))
-    private void vulkanmod$traceSkyboxHead(int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
-        if (vulkanmod$skyboxFrames > 4) {
-            return;
-        }
-        VulkanMod.LOGGER.info("[VKPROF] renderSkybox#{} head: Display={}x{}  mcDisplay={}x{}  scaled={}x{}",
-                vulkanmod$skyboxFrames, Display.getWidth(), Display.getHeight(),
-                this.mc.displayWidth, this.mc.displayHeight, this.width, this.height);
-    }
-
-    @Inject(method = "drawPanorama", at = @At("RETURN"))
-    private void vulkanmod$tracePanoReturn(int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
-        if (vulkanmod$panoDumped) {
-            return;
-        }
-        vulkanmod$panoDumped = true;
-        VulkanMod.LOGGER.info("[VKPROF] drawPanorama returned");
-        com.yuhan123.vulkanmod.vulkan.texture.ImageUtil.dumpMainTargetPng("menu_pano_after_draw.png");
-    }
-
-    @Inject(method = "renderSkybox", at = @At("TAIL"))
-    private void vulkanmod$traceSkyboxTail(int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
-        if (vulkanmod$skyboxFrames > 4) {
-            return;
-        }
-        VulkanMod.LOGGER.info("[VKPROF] renderSkybox#{} tail", vulkanmod$skyboxFrames);
-        if (vulkanmod$skyboxFrames == 4) {
-            com.yuhan123.vulkanmod.vulkan.texture.ImageUtil.dumpMainTargetPng("menu_pano_after_skybox.png");
-        }
-        vulkanmod$skyboxFrames++;
-    }
-
-    // DISABLED: vanilla drawPanorama already applies rotate(90,0,0,1) while
-    // building the cube's orientation; adding -90 about the same axis cancels it
-    // and rolls the captured view onto a different (sky-heavy) face. Kept here
-    // because it was part of the revision believed to render the background.
-//    @Inject(method = "drawPanorama", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/GlStateManager;enableBlend()V"))
-//    public void correctRotation(CallbackInfo ci) {
-//        GlStateManager.rotate(-90.0F, 0.0F, 0.0F, 1.0F);
-//    }
 
     /**
      * Supplies the panorama's projection, replacing
@@ -154,22 +116,20 @@ public abstract class GuiMainMenuMixin extends GuiScreen {
      * nothing into {@link MatrixState}, and the six panorama faces are drawn with
      * whatever projection was current - the GUI ortho. A unit cube under an ortho
      * that maps GUI pixels lands outside the frustum, so all six faces are
-     * clipped: the panorama is drawn but never rasterized, the backbuffer stays
-     * black, and the menu shows only the two gradient strips. That is the
-     * "只剩渐变 / no background" report.
+     * clipped: the panorama is drawn but never rasterized and the menu shows only
+     * the two gradient strips. This has to be written at the call site, not at
+     * drawPanorama HEAD: vanilla does {@code matrixMode(GL_PROJECTION)} +
+     * {@code loadIdentity()} immediately before the gluPerspective call, so
+     * anything written earlier is erased by that loadIdentity.
      *
-     * <p>This has to be written at the call site, not at drawPanorama HEAD:
-     * vanilla does {@code matrixMode(GL_PROJECTION)} + {@code loadIdentity()}
-     * immediately before the gluPerspective call, so anything written earlier is
-     * erased by that loadIdentity.
+     * <p>The aspect ratio passed is the REAL window aspect, not vanilla's
+     * hard-coded 1.0: with a full-screen viewport a 1.0 aspect would horizontally
+     * stretch the panorama on a wide monitor.
      */
-    @Redirect(method = "drawPanorama",
-            at = @At(value = "INVOKE", target = "Lorg/lwjgl/util/glu/Project;gluPerspective(FFFF)V"),
-            remap = false)
-    private static void vulkanmod$panoramaPerspective(float fovy, float aspect, float zNear, float zFar) {
-//        VulkanMod.LOGGER.info("[VKPROF] panoramaPerspective fired fovy={} aspect={} near={} far={}",
-//                fovy, aspect, zNear, zFar);
-        MatrixState.perspective(fovy, aspect, zNear, zFar);
-        MatrixState.traceNextProjection = true;
-    }
+//    @Redirect(method = "drawPanorama",
+//            at = @At(value = "INVOKE", target = "Lorg/lwjgl/util/glu/Project;gluPerspective(FFFF)V"),
+//            remap = false)
+//    private static void vulkanmod$panoramaPerspective(float fovy, float aspect, float zNear, float zFar) {
+//        MatrixState.perspective(fovy, (float) Display.getWidth() / (float) Display.getHeight(), zNear, zFar);
+//    }
 }
