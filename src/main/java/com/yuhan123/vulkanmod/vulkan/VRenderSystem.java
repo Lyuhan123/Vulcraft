@@ -133,6 +133,35 @@ public abstract class VRenderSystem {
      */
     public static final MappedBuffer unlitLightmapCoord = new MappedBuffer(4 * 4);
 
+    /**
+     * Mirrors whether vanilla's fixed-function lighting has been switched on
+     * (GL_LIGHTING). This is how 1.12.2 decides whether an <em>item model</em>
+     * gets directional shading at all: {@code RenderItem.setupGuiTransform()}
+     * enables it when {@code bakedmodel.isGui3d()} and disables it otherwise,
+     * so a 3D block in the inventory is shaded while a flat icon (a sword, an
+     * ingot) stays full-bright.
+     *
+     * <p>There is no GL lighting in this port - {@code GlStateManager
+     * .enableLighting()} was a no-op, so every item drew full-bright and the
+     * blocks lost their face shading. The bit now reaches the item pipeline as
+     * the {@code LightingEnabled} float so the shader can reproduce it.
+     *
+     * <p>Default false, matching OpenGL's own default.
+     */
+    public static boolean lightingEnabled = false;
+
+    // GUI item lighting -- mirrors RenderHelper.enableGUIStandardItemLighting (1.12.2).
+    // The shader (shaders/core/item/item.vsh) no longer hardcodes these: it reads the
+    // eye-space directions from lightDirection0/1, which the glLight overwrite fills by
+    // running the position through the current modelview. That is what carries the
+    // rotate(-30,0,1,0) + rotate(165,1,0,0) pair vanilla wraps around the glLight call.
+    // Kept here as the un-rotated reference values (L = normalize(+-0.2, 1, -+0.7));
+    // ambient 0.4 and per-light diffuse 0.6 live in shaders/include/light.glsl.
+    public static final float GUI_LIGHT_AMBIENT = 0.4f;
+    public static final float GUI_LIGHT_DIFFUSE = 0.6f;
+    public static final float[] GUI_LIGHT_L0 = {0.1617f, 0.8085f, -0.5659f};
+    public static final float[] GUI_LIGHT_L1 = {-0.1617f, 0.8085f, 0.5659f};
+
     public static float alphaCutout = 0.0f;
 
     /**

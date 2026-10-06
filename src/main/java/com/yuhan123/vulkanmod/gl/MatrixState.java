@@ -3,8 +3,10 @@ package com.yuhan123.vulkanmod.gl;
 import com.yuhan123.vulkanmod.VulkanMod;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
+import com.yuhan123.vulkanmod.vulkan.util.MappedBuffer;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
 import java.nio.FloatBuffer;
 import java.util.ArrayDeque;
@@ -212,6 +214,46 @@ public class MatrixState {
     public static void getMatrix(int pname, FloatBuffer result) {
         Matrix4f m = pname == GL_PROJECTION_MATRIX ? projectionStack.peek() : modelViewStack.peek();
         m.get(result);
+    }
+
+    /**
+     * Scratch vector for {@link #modelViewTransformDirection}, so the light
+     * setup path does not allocate on every {@code glLight} call.
+     */
+    private static final Vector3f LIGHT_DIR_SCRATCH = new Vector3f();
+
+    /**
+     * Transforms a light POSITION the way the GL fixed-function pipeline does at
+     * {@code glLight} time: by the <em>current modelview</em>, and normalised
+     * (the GUI lights are directional, w=0, so only the 3x3 part matters).
+     *
+     * <p>This is what makes vanilla's GUI item lighting work, and it is
+     * invisible in this port unless it is reproduced here.
+     * {@code RenderHelper.enableGUIStandardItemLighting()} does:
+     * <pre>
+     *   pushMatrix(); rotate(-30, 0,1,0); rotate(165, 1,0,0);
+     *   enableStandardItemLighting();   // <- calls glLight(GL_POSITION, LIGHT0_POS)
+     *   popMatrix();
+     * </pre>
+     * so by the time GL stores the light it has already been rotated by that
+     * -30/165 pair. Storing the raw LIGHT0_POS/LIGHT1_POS instead - as this
+     * mixin used to - drops those rotations on the floor, and the two lights end
+     * up both pointing nearly straight up (+0.8085 in Y), which is exactly why
+     * the top face saturated at the {@code min(1.0, ...)} clamp while the four
+     * sides all crowded into 0.50..0.74 and the cube read flat next to vanilla.
+     *
+     * <p>Reads {@code modelViewStack} directly rather than {@link #current()}:
+     * GL transforms a light position by the modelview whatever matrix mode
+     * happens to be selected, so the mode must not be able to change the answer.
+     */
+    public static void modelViewTransformDirection(float x, float y, float z, float[] out) {
+        Matrix4f m = modelViewStack.peek();
+        LIGHT_DIR_SCRATCH.set(x, y, z);
+        // transformDirection applies the 3x3 and normalises, matching GL.
+        m.transformDirection(LIGHT_DIR_SCRATCH);
+        out[0] = LIGHT_DIR_SCRATCH.x;
+        out[1] = LIGHT_DIR_SCRATCH.y;
+        out[2] = LIGHT_DIR_SCRATCH.z;
     }
 
     private static Matrix4f current() {

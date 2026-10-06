@@ -10,11 +10,13 @@ layout(binding = 1) uniform UBO{
     float FogStart;
     float FogEnd;
     vec4 LightmapCoord;
+    float LightingEnabled;
 };
 
 layout(location = 0) in vec4 vertexColor;
 layout(location = 1) in vec2 texCoord0;
 layout(location = 2) in float vertexDistance;
+layout(location = 3) in float faceShade;
 
 layout(location = 0) out vec4 fragColor;
 
@@ -28,6 +30,10 @@ void main() {
     // LightmapCoord of (240,240) is the full-bright corner, so a draw that
     // never received a coordinate keeps its old look instead of going black.
     color.rgb *= texture(Sampler2, (LightmapCoord.xy + 8.0) / 256.0).rgb;
+    // Item lighting is a switch separate from the lightmap: vanilla turns it on
+    // per item model, and a flat icon has to stay bright even while the lightmap
+    // coordinate is dark. See VRenderSystem.lightingEnabled.
+    color.rgb *= mix(1.0, faceShade, step(0.5, LightingEnabled));
     if (color.a < 0.1) {
         discard;
     }

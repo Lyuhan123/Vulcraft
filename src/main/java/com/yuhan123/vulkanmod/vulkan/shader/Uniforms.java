@@ -37,6 +37,12 @@ public class Uniforms {
 //        vec1f_uniformMap.put("GameTime", VRenderSystem::getShaderGameTime);
 //        vec1f_uniformMap.put("GlintAlpha", VRenderSystem::getShaderGlintAlpha);
         vec1f_uniformMap.put("AlphaCutout", () -> VRenderSystem.alphaCutout);
+        // Mirrors GL_LIGHTING (see VRenderSystem.lightingEnabled). The item
+        // pipeline reads it to shade 3D block icons the way vanilla does while
+        // leaving flat item icons full-bright. Published globally like the
+        // lightmap below, or the UBO field would bind to the shader-local
+        // VkUniform that nothing writes and stay at its JSON default.
+        vec1f_uniformMap.put("LightingEnabled", () -> VRenderSystem.lightingEnabled ? 1.0f : 0.0f);
 
         //Vec2
         vec2f_uniformMap.put("ScreenSize", VRenderSystem::getScreenSize);

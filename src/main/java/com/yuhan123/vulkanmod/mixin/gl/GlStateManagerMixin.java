@@ -314,10 +314,15 @@ public class GlStateManagerMixin {
 
    @Overwrite
    public static void enableLighting() {
+      // Was a no-op, which is why a 3D block in the inventory drew full-bright:
+      // RenderItem.setupGuiTransform() turns this on for isGui3d() models and
+      // vanilla shades them with GL lighting. See VRenderSystem.lightingEnabled.
+      VRenderSystem.lightingEnabled = true;
    }
 
    @Overwrite
    public static void disableLighting() {
+      VRenderSystem.lightingEnabled = false;
    }
 
    @Overwrite
@@ -347,17 +352,26 @@ public class GlStateManagerMixin {
          float x = p_187438_2_.get(pos);
          float y = p_187438_2_.get(pos + 1);
          float z = p_187438_2_.get(pos + 2);
+         // GL transforms a light POSITION by the current modelview before
+         // storing it. That is how RenderHelper.enableGUIStandardItemLighting's
+         // rotate(-30,0,1,0) + rotate(165,1,0,0) reach the light, and skipping
+         // it is what left GUI items flat-shaded (see
+         // MatrixState.modelViewTransformDirection).
+         MatrixState.modelViewTransformDirection(x, y, z, MODELVIEW_LIGHT_SCRATCH);
          if (p_187438_0_ == 16384) {
-            VRenderSystem.lightDirection0.putFloat(0, x);
-            VRenderSystem.lightDirection0.putFloat(4, y);
-            VRenderSystem.lightDirection0.putFloat(8, z);
+            VRenderSystem.lightDirection0.putFloat(0, MODELVIEW_LIGHT_SCRATCH[0]);
+            VRenderSystem.lightDirection0.putFloat(4, MODELVIEW_LIGHT_SCRATCH[1]);
+            VRenderSystem.lightDirection0.putFloat(8, MODELVIEW_LIGHT_SCRATCH[2]);
          } else if (p_187438_0_ == 16385) {
-            VRenderSystem.lightDirection1.putFloat(0, x);
-            VRenderSystem.lightDirection1.putFloat(4, y);
-            VRenderSystem.lightDirection1.putFloat(8, z);
+            VRenderSystem.lightDirection1.putFloat(0, MODELVIEW_LIGHT_SCRATCH[0]);
+            VRenderSystem.lightDirection1.putFloat(4, MODELVIEW_LIGHT_SCRATCH[1]);
+            VRenderSystem.lightDirection1.putFloat(8, MODELVIEW_LIGHT_SCRATCH[2]);
          }
       }
    }
+
+   @Unique
+   private static final float[] MODELVIEW_LIGHT_SCRATCH = new float[3];
 
    @Overwrite
    public static void glLightModel(int p_187424_0_, FloatBuffer p_187424_1_) {
