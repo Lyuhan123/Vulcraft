@@ -1,7 +1,7 @@
 //light.glsl
 //#pragma once
-const float MINECRAFT_LIGHT_POWER = (0.4);
-const float MINECRAFT_AMBIENT_LIGHT = (0.6);
+const float MINECRAFT_LIGHT_POWER = (0.6);
+const float MINECRAFT_AMBIENT_LIGHT = (0.4);
 
 vec4 minecraft_sample_lightmap(sampler2D lightMap, ivec2 uv) {
     return texelFetch(lightMap, bitfieldExtract(uv, 4, 8), 0);

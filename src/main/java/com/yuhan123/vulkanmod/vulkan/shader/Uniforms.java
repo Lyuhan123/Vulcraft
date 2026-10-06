@@ -43,6 +43,11 @@ public class Uniforms {
         // lightmap below, or the UBO field would bind to the shader-local
         // VkUniform that nothing writes and stay at its JSON default.
         vec1f_uniformMap.put("LightingEnabled", () -> VRenderSystem.lightingEnabled ? 1.0f : 0.0f);
+        // Selects fog for the cloud layer, which shares its pipeline with the
+        // unfogged HUD. Published globally for the same reason as LightingEnabled
+        // above - the shader-local VkUniform has no writer and would stay at the
+        // JSON default. See VRenderSystem.fogEnabled.
+        vec1f_uniformMap.put("FogEnabled", () -> VRenderSystem.fogEnabled ? 1.0f : 0.0f);
 
         //Vec2
         vec2f_uniformMap.put("ScreenSize", VRenderSystem::getScreenSize);

@@ -10,6 +10,7 @@ layout(binding = 1) uniform UBO{
     vec4 FogColor;
     float FogStart;
     float FogEnd;
+    float FogEnabled;
     vec4 EntityFlash;
 };
 
@@ -44,5 +45,18 @@ void main() {
     // mob wherever the texture alpha is low but above the test threshold.
     // Forcing alpha to 1 matches the "alpha test = cutout" intent and is what
     // the sibling position_tex_normal shader does for the same reason.
-    fragColor = vec4(color.rgb, 1.0);
+    //
+    // Vanilla fogs the fancy cloud layer, which is what makes distant clouds
+    // fade into the sky. This pipeline is shared with unfogged geometry, so the
+    // fade is gated on FogEnabled rather than applied unconditionally - see
+    // VRenderSystem.fogEnabled. The fog colour has to be folded in after the
+    // alpha has been forced to 1, or linear_fog would blend the fog colour in
+    // with the texture's alpha weighting.
+    vec4 opaque = vec4(color.rgb, 1.0);
+    // RGB-only fog, same reason as the sibling position_tex_color shader: fog
+    // must not rewrite the alpha of a blended layer.
+    float fogAmount = smoothstep(FogStart, FogEnd, vertexDistance) * FogColor.a;
+    fragColor = (FogEnabled > 0.5)
+            ? vec4(mix(opaque.rgb, FogColor.rgb, fogAmount), opaque.a)
+            : opaque;
 }

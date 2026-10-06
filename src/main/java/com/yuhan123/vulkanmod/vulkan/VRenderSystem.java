@@ -150,6 +150,28 @@ public abstract class VRenderSystem {
      */
     public static boolean lightingEnabled = false;
 
+    /**
+     * Selects fog for the world draws that share a pipeline with unfogged GUI
+     * geometry. Reaches the shaders as the {@code FogEnabled} float.
+     *
+     * <p>The cloud layer (fast: {@code POSITION_TEX_COLOR}, fancy:
+     * {@code POSITION_TEX_COLOR_NORMAL}) is drawn through the very same pipelines
+     * the HUD, the chat and every item tooltip use. Vanilla fogs clouds - distant
+     * clouds fade into the sky - and does not fog the GUI, but this port had no
+     * way to tell the two apart: {@code GlStateManager.enableFog/disableFog} are
+     * overwritten as no-ops, so the GL enable bit never reached the shaders, and
+     * rather than risk fogging the HUD the cloud shaders simply never called
+     * {@code linear_fog} - which is why distant clouds stayed flat and bright.
+     *
+     * <p>Instead of guessing at vanilla's fog state globally, this flag is raised
+     * exactly around the cloud pass: see EntityRendererMixin's two
+     * {@code renderCloudsCheck} gluPerspective redirects. The first installs the
+     * cloud frustum, the second restores the world frustum, so only cloud
+     * geometry is submitted in between. Default false leaves every non-cloud draw
+     * with the appearance it has today.
+     */
+    public static boolean fogEnabled = false;
+
     // GUI item lighting -- mirrors RenderHelper.enableGUIStandardItemLighting (1.12.2).
     // The shader (shaders/core/item/item.vsh) no longer hardcodes these: it reads the
     // eye-space directions from lightDirection0/1, which the glLight overwrite fills by

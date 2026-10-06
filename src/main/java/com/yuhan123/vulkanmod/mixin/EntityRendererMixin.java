@@ -40,6 +40,9 @@ public class EntityRendererMixin {
             remap = false)
     private static void vulkanmod$cloudPerspective(float fovy, float aspect, float zNear, float zFar) {
         MatrixState.perspective(fovy, aspect, zNear, zFar);
+        // Everything submitted from here until the second gluPerspective is cloud
+        // geometry, and vanilla fogs it. See VRenderSystem.fogEnabled.
+        VRenderSystem.fogEnabled = true;
     }
 
     /**
@@ -52,6 +55,9 @@ public class EntityRendererMixin {
             remap = false)
     private static void vulkanmod$restoreWorldPerspective(float fovy, float aspect, float zNear, float zFar) {
         MatrixState.perspective(fovy, aspect, zNear, zFar);
+        // Cloud pass is over. Clear the flag, or the HUD - which shares these
+        // pipelines - would be fogged as well.
+        VRenderSystem.fogEnabled = false;
     }
 
     /**
