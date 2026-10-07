@@ -36,8 +36,7 @@ public class EntityRendererMixin {
      * frustum regardless of the render distance.
      */
     @Redirect(method = "renderCloudsCheck",
-            at = @At(value = "INVOKE", target = "Lorg/lwjgl/util/glu/Project;gluPerspective(FFFF)V", ordinal = 0),
-            remap = false)
+            at = @At(value = "INVOKE", target = "Lorg/lwjgl/util/glu/Project;gluPerspective(FFFF)V", ordinal = 0, remap = false))
     private static void vulkanmod$cloudPerspective(float fovy, float aspect, float zNear, float zFar) {
         MatrixState.perspective(fovy, aspect, zNear, zFar);
         // Everything submitted from here until the second gluPerspective is cloud
@@ -51,8 +50,7 @@ public class EntityRendererMixin {
      * leave the world drawing under the cloud frustum.
      */
     @Redirect(method = "renderCloudsCheck",
-            at = @At(value = "INVOKE", target = "Lorg/lwjgl/util/glu/Project;gluPerspective(FFFF)V", ordinal = 1),
-            remap = false)
+            at = @At(value = "INVOKE", target = "Lorg/lwjgl/util/glu/Project;gluPerspective(FFFF)V", ordinal = 1, remap = false))
     private static void vulkanmod$restoreWorldPerspective(float fovy, float aspect, float zNear, float zFar) {
         MatrixState.perspective(fovy, aspect, zNear, zFar);
         // Cloud pass is over. Clear the flag, or the HUD - which shares these

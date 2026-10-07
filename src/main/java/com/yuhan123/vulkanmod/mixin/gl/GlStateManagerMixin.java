@@ -404,12 +404,23 @@ public class GlStateManagerMixin {
    public static void disableOutlineMode() {
    }
 
+   /**
+    * Drives {@link VRenderSystem#fogEnabled}, the global flag the cloud and
+    * sky pipelines gate their fog on. Was a no-op, which is why the sky dome
+    * (a POSITION-only mesh drawn flat in the sky colour) never received the
+    * fog blend that produces vanilla's horizon gradient - it rendered as one
+    * solid blue. Vanilla's cloud path calls {@code setupFog} -> enableFog, so
+    * this now also covers clouds, and the manual flips in EntityRendererMixin
+    * (kept as belt-and-suspenders) stay consistent with it.
+    */
    @Overwrite
    public static void enableFog() {
+      VRenderSystem.fogEnabled = true;
    }
 
    @Overwrite
    public static void disableFog() {
+      VRenderSystem.fogEnabled = false;
    }
 
    @Overwrite
