@@ -151,6 +151,42 @@
             0.0,
             1.0
           ]
+        },
+        {
+          "name": "MaterialAmbient",
+          "type": "float",
+          "count": 3,
+          "values": [
+            0.2,
+            0.2,
+            0.2
+          ]
+        },
+        {
+          "name": "MaterialDiffuse",
+          "type": "float",
+          "count": 3,
+          "values": [
+            0.8,
+            0.8,
+            0.8
+          ]
+        },
+        {
+          "name": "ColorMaterialMode",
+          "type": "float",
+          "count": 1,
+          "values": [
+            3.0
+          ]
+        },
+        {
+          "name": "LightModelAmbient",
+          "type": "float",
+          "count": 1,
+          "values": [
+            0.4
+          ]
         }
       ]
     },

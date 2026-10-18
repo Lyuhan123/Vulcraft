@@ -233,6 +233,20 @@ public class VulkanImage {
     }
 
     public void uploadSubTextureAsync(int mipLevel, int width, int height, int xOffset, int yOffset, int unpackSkipRows, int unpackSkipPixels, int unpackRowLength, long srcPtr) {
+        // Hold the upload lock for the whole operation: staging-buffer allocation,
+        // recording the copy into the batch, and registering the read-only
+        // transition. A concurrent submitCommands() (e.g. the Forge splash's
+        // Renderer.endFrame() on its own thread) must not submit the batch while
+        // it is being recorded, nor rewind the staging buffer under it.
+        ImageUploadHelper.LOCK.lock();
+        try {
+            uploadSubTextureAsyncLocked(mipLevel, width, height, xOffset, yOffset, unpackSkipRows, unpackSkipPixels, unpackRowLength, srcPtr);
+        } finally {
+            ImageUploadHelper.LOCK.unlock();
+        }
+    }
+
+    private void uploadSubTextureAsyncLocked(int mipLevel, int width, int height, int xOffset, int yOffset, int unpackSkipRows, int unpackSkipPixels, int unpackRowLength, long srcPtr) {
         // GL treats UNPACK_ROW_LENGTH == 0 as "same as width"
         int rowLength = unpackRowLength != 0 ? unpackRowLength : width;
         long uploadSize = (long) (rowLength * height - unpackSkipPixels) * this.formatSize;
@@ -291,6 +305,25 @@ public class VulkanImage {
         // subpass, which is illegal without a self-dependency.
         if (ImageUploadHelper.INSTANCE.isPendingReadOnly(this))
             return;
+
+        // The draw path reaches this through Pipeline.needsUpdate() /
+        // updateDescriptors(), which walk *every* image descriptor of the
+        // pipeline - including images another thread is uploading right now -
+        // so it cannot assume the frame's command buffer is barrier-able.
+        //
+        // A vkCmdPipelineBarrier recorded while a render pass instance is open
+        // on that buffer is an invalid usage (VUID-vkCmdPipelineBarrier-None-07889),
+        // and the barrier it replaces is exactly the one that was supposed to
+        // bring the image into SHADER_READ_ONLY_OPTIMAL - so the frame then
+        // samples an image the driver still has in UNDEFINED
+        // (VUID-vkCmdDraw-None-09600). Defer to the upload batch instead: it is
+        // submitted on the same queue *before* the frame that samples the image
+        // (see Renderer.endFrame()), so the transition still happens first.
+        Renderer renderer = Renderer.getInstance();
+        if (renderer == null || renderer.isRenderPassActive() || Renderer.getCommandBuffer() == null) {
+            ImageUploadHelper.INSTANCE.addPendingReadOnly(this);
+            return;
+        }
 
         try (MemoryStack stack = MemoryStack.stackPush()) {
             readOnlyLayout(stack, Renderer.getCommandBuffer());

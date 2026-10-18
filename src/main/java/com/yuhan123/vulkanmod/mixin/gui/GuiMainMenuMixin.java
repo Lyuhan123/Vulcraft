@@ -1,8 +1,8 @@
 package com.yuhan123.vulkanmod.mixin.gui;
 
 import com.yuhan123.vulkanmod.VKProf;
-import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.VulkanMod;
+import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.gl.MatrixState;
 import net.minecraft.client.gui.GuiMainMenu;
 import net.minecraft.client.gui.GuiScreen;
@@ -13,10 +13,8 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.gen.Invoker;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.ModifyArgs;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 
 @Mixin(GuiMainMenu.class)
 public abstract class GuiMainMenuMixin extends GuiScreen {
@@ -52,30 +50,32 @@ public abstract class GuiMainMenuMixin extends GuiScreen {
 
         vulkanmod$autoJoinFired = true;
         VKProf.info("[VKPROF] auto-joining save 'New World'");
-        this.mc.launchIntegratedServer("New World", "New World", (net.minecraft.world.WorldSettings) null);
+        // NOTE: passing null WorldSettings makes vanilla launchIntegratedServer do
+        // `settings = new WorldSettings(worldInfo)` with a null worldInfo for a
+        // *fresh* save -> NPE in WorldSettings.<init>. Always pass a real settings.
+        net.minecraft.world.WorldSettings vulkanmod$ws = new net.minecraft.world.WorldSettings(
+                123456789L,
+                net.minecraft.world.GameType.SURVIVAL,
+                false,
+                true,
+                net.minecraft.world.WorldType.DEFAULT);
+        this.mc.launchIntegratedServer("New World", "New World", vulkanmod$ws);
     }
 
     /**
-     * Sharp main-menu panorama.
+     * Sharp main-menu panorama — the initial / clear state.
      *
-     * <p>Vanilla renders the panorama through {@code viewport(0,0,256,256)}, then
-     * pulls exactly that 256x256 square out of the framebuffer with
-     * {@code glCopyTexSubImage2D(...,256,256)} into {@code backgroundTexture}
-     * (a 256x256 DynamicTexture), blurs it 7 times, and finally stretches
-     * {@code backgroundTexture} across the whole screen. That upscaled 256x256
-     * block is what reads as "too blurry".
+     * <p>Vanilla bakes the panorama into a 256x256 DynamicTexture: it renders into a
+     * 256x256 viewport, copies that square out of the framebuffer with
+     * {@code glCopyTexSubImage2D}, blurs it 7 times, then stretches the 256x256
+     * texture across the whole window. That upscaled block is what reads as a soft
+     * blur (and, under Vulkan, as grain/mush when the copy is taken wrong).
      *
-     * <p>We replace {@code renderSkybox} entirely: paint {@code drawPanorama}
-     * straight into the game framebuffer at native resolution (real window
-     * viewport, real aspect), and skip the 256x256 copy / blur / blit. The GUI
-     * gradient + title composite on top in {@code drawScreen} exactly as before,
-     * so the result is a crisp, full-resolution background with no black corner.
-     */
-    /**
-     * Exposes the private {@code drawPanorama} so this mixin can invoke it after
-     * cancelling the original renderSkybox. Generated on the target class; the
-     * call still runs drawPanorama with all of its own injections (the
-     * gluPerspective redirect + the X-tilt) applied.
+     * <p>We instead cancel {@code renderSkybox} and paint {@code drawPanorama}
+     * straight into the game framebuffer at native resolution — a real window-sized
+     * viewport with the real (window) aspect — so the background is crisp and
+     * full-resolution with no upscaling and no black corner. {@code drawScreen}
+     * still composites the GUI gradient + title on top exactly as before.
      */
     @Invoker("drawPanorama")
     public abstract void vulkanmod$drawPanorama(int mouseX, int mouseY, float partialTicks);
@@ -90,11 +90,29 @@ public abstract class GuiMainMenuMixin extends GuiScreen {
     }
 
     /**
-     * Per the user's request: roll the captured panorama -90 degrees about the
-     * X axis so the background faces a different (sky-heavy) direction. Applied
-     * once to the shared modelview, right after vanilla's own
-     * {@code rotate(180,1,0,0)} + {@code rotate(90,0,0,1)} base orientation and
-     * before the six cube faces are drawn.
+     * Depth test off for the panorama.
+     *
+     * <p>Under Vulkan there is only one swapchain depth buffer shared by the
+     * panorama and the GUI; the previous frame's GUI has already written depths
+     * around ndc z ~0 there, while a unit cube at the camera with
+     * {@code gluPerspective(120, 1, 0.05, 10)} lands at ndc z ~0.91 and the enabled
+     * {@code GL_LEQUAL} test rejects the entire panorama (the 256x256 copy then
+     * picks up whatever was underneath — a flat colour). Disabling the test
+     * reproduces vanilla's effective behaviour (vanilla draws the panorama into a
+     * separate default framebuffer whose depth is clean). {@code drawPanorama}
+     * re-enables depth at its own tail, so nothing leaks.
+     */
+    @Inject(method = "drawPanorama", at = @At("HEAD"))
+    private void vulkanmod$panoramaNoDepth(int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
+        GlStateManager.disableDepth();
+    }
+
+    /**
+     * Roll the panorama -90 degrees about the Z axis so the background faces a
+     * different (sky-heavy) direction. Applied once, right after vanilla's own
+     * base orientation ({@code rotate(180,1,0,0)} then {@code rotate(90,0,0,1)})
+     * and before the six cube faces are drawn. (User request: "reveal sky and
+     * distant view".)
      */
     @Inject(method = "drawPanorama",
             at = @At(value = "INVOKE",
@@ -108,28 +126,23 @@ public abstract class GuiMainMenuMixin extends GuiScreen {
      * Supplies the panorama's projection, replacing
      * {@code Project.gluPerspective(120, 1, 0.05, 10)}.
      *
-     * <p>The mixin meant to hook that call ({@code gl.ProjectMixin}, on
-     * {@code org.lwjgl.util.glu.Project}) never applies here: the mixin platform
-     * cannot resolve that class in this Cleanroom/lwjglx setup, logs
-     * "@Mixin target org.lwjgl.util.glu.Project was not found" once at startup,
-     * and skips it permanently. The real gluPerspective therefore runs, writes
-     * nothing into {@link MatrixState}, and the six panorama faces are drawn with
-     * whatever projection was current - the GUI ortho. A unit cube under an ortho
-     * that maps GUI pixels lands outside the frustum, so all six faces are
-     * clipped: the panorama is drawn but never rasterized and the menu shows only
-     * the two gradient strips. This has to be written at the call site, not at
-     * drawPanorama HEAD: vanilla does {@code matrixMode(GL_PROJECTION)} +
-     * {@code loadIdentity()} immediately before the gluPerspective call, so
-     * anything written earlier is erased by that loadIdentity.
+     * <p>{@code gl.ProjectMixin} (an {@code @Overwrite} on
+     * {@code org.lwjgl.util.glu.Project}) does not apply in this Cleanroom/lwjglx
+     * setup — the mixin platform cannot resolve that class, logs the usual "was not
+     * found" line once at startup and skips it permanently. The real
+     * {@code gluPerspective} therefore writes nothing into {@link MatrixState}, and
+     * the six cube faces would be drawn under the GUI ortho, so a unit cube lands
+     * outside the frustum and every face is clipped (menu shows only the gradient
+     * strips). Hence this {@code @Redirect} at the call site, the same technique
+     * {@code EntityRendererMixin} uses for the cloud pass.
      *
-     * <p>The aspect ratio passed is the REAL window aspect, not vanilla's
-     * hard-coded 1.0: with a full-screen viewport a 1.0 aspect would horizontally
-     * stretch the panorama on a wide monitor.
+     * <p>It cannot be injected at {@code drawPanorama} HEAD instead: vanilla calls
+     * {@code matrixMode(GL_PROJECTION)} + {@code loadIdentity()} immediately before
+     * the gluPerspective, which erases anything written earlier.
+     *
+     * <p>The aspect is the REAL window aspect, NOT vanilla's hard-coded 1.0: with a
+     * full-screen viewport a 1.0 aspect would horizontally stretch the panorama on
+     * a wide monitor.
      */
-//    @Redirect(method = "drawPanorama",
-//            at = @At(value = "INVOKE", target = "Lorg/lwjgl/util/glu/Project;gluPerspective(FFFF)V"),
-//            remap = false)
-//    private static void vulkanmod$panoramaPerspective(float fovy, float aspect, float zNear, float zFar) {
-//        MatrixState.perspective(fovy, (float) Display.getWidth() / (float) Display.getHeight(), zNear, zFar);
-//    }
+
 }

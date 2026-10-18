@@ -35,9 +35,37 @@ public class TessellatorMixin {
         if (vertexCount <= 0)
             return;
 
+        // Instrumentation placed BEFORE the isRecording gate: it has to
+        // distinguish "the cloud batch never reaches vkDraw" from "it arrives
+        // but isRecording() is false so it is silently dropped". Fancy clouds
+        // are POSITION_TEX_COLOR_NORMAL batches, fast clouds one 1024-vertex
+        // POSITION_TEX_COLOR batch; neither ever appeared in DRAWTRACE.
+        // Full draw inventory (no format filter): the cloud batch has to show up
+        // here under SOME format if the cloud layer renders through Tessellator
+        // at all. Logging every draw with its element list, vertex count and
+        // whether the Vulkan renderer is accepting draws.
+        final VertexFormat cfFmt = buffer.getVertexFormat();
+        if (cloudSeenLogs < 80 && Minecraft.getMinecraft().world != null && vertexCount >= 64) {
+            cloudSeenLogs++;
+            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(
+                    "[VKPROF] CLOUD-DRAW-SEEN #{} count={} isRecording={} fmt={}",
+                    cloudSeenLogs, vertexCount, Renderer.isRecording(), cfFmt);
+        }
+
         if (!Renderer.isRecording())
             return;
 
+        // Recording from the splash thread has to exclude the main thread's
+        // frame transitions: apply() uploads into the per-frame uniform buffer
+        // and the draw binds it, both of which Renderer.beginFrame() rewinds
+        // (see Drawer.splashPresenting). Reentrant with the vanilla splash's
+        // begin/end and with Drawer's own entry-point locks; a no-op during
+        // normal play. The try opened here extends to the end of this method.
+        final boolean splashLock = com.yuhan123.vulkanmod.vulkan.Drawer.splashPresenting();
+        if (splashLock) {
+            com.yuhan123.vulkanmod.render.texture.ImageUploadHelper.LOCK.lock();
+        }
+        try {
         VertexFormat vertexFormat = buffer.getVertexFormat();
         ShaderInstance shader = PipelineManager.chooseShader(vertexFormat);
 
@@ -135,7 +163,21 @@ public class TessellatorMixin {
         // POSITION_TEX_COLOR draw; if nothing near that size shows up, the cloud
         // pass is not reaching Tessellator.draw at all and the problem is upstream
         // of the vertex data.
-        if (cloudDiagDumps < 24 && vertexCount >= 256) {
+        // Cloud colour diagnostic. Fancy clouds are POSITION_TEX_COLOR_NORMAL
+        // drawn one 4-vertex tile at a time, and fast clouds are a single
+        // POSITION_TEX_COLOR grid; the old "vertexCount >= 256" filter threw
+        // away EVERY fancy-cloud tile, which is why no vColor ever showed up in
+        // the log. Match on the cloud formats instead, with no size filter.
+        // Only in-world draws. The main menu / loading screen draws plenty of
+        // POSITION_TEX_COLOR quads too (panorama, GUI), and with a 24-dump cap
+        // they exhausted the budget before the world ever loaded - every
+        // earlier run logged menu draws and no clouds at all.
+        // renderCloudsFast emits ONE 1024-vertex POSITION_TEX_COLOR draw, so a
+        // small POSITION_TEX_COLOR batch is not the cloud layer (rain/particles
+        // use it too) - requiring >= 512 keeps the 24-dump budget on real clouds.
+        if (cloudDiagDumps < 40 && Minecraft.getMinecraft().world != null
+                && (vertexFormat == net.minecraft.client.renderer.vertex.DefaultVertexFormats.POSITION_TEX_COLOR_NORMAL
+                    || vertexFormat == net.minecraft.client.renderer.vertex.DefaultVertexFormats.POSITION_TEX_COLOR)) {
             cloudDiagDumps++;
             final java.nio.FloatBuffer mvp = com.yuhan123.vulkanmod.vulkan.VRenderSystem.mvpFloatBuffer();
             double camX = Double.NaN, camZ = Double.NaN;
@@ -148,17 +190,70 @@ public class TessellatorMixin {
             final float u0 = vertexData.getFloat(12);
             final float v0 = vertexData.getFloat(16);
             vertexData.position(0);
+            // Baked cloud colour sits at byte 20 for both cloud formats
+            // (Position 12 + UV0 8 precedes it). Vanilla writes
+            // world.getCloudColour there, scaled 0.7-0.9 per face: at night that
+            // is ~(18..38), at day ~(230). ~255 at night means the cloud colour
+            // never made it into the vertex - the real "clouds full-bright"
+            // cause - as opposed to a lightmap problem.
+            final int cr = vertexData.get(20) & 0xff, cg = vertexData.get(21) & 0xff,
+                      cb = vertexData.get(22) & 0xff, ca = vertexData.get(23) & 0xff;
+            // Global colour = ColorModulator (set by GlStateManager.color).
+            // renderCloudsFancy never calls it, so this must read (1,1,1,1);
+            // a bright value here means a stale global tint is washing the
+            // clouds out. lightmapEnabled must be false at the cloud window.
+            final float[] gcol = com.yuhan123.vulkanmod.vulkan.VRenderSystem.getColor();
+            final boolean lmOn = com.yuhan123.vulkanmod.vulkan.VRenderSystem.lightmapEnabled;
+            // Ground truth: what the world thinks the time is, and what the CPU
+            // computes the cloud colour to be right now. If worldTime is a night
+            // tick and cloudColour is dark but vColor above is 255, the cloud
+            // colour is being lost between CPU and vertex buffer - that is the
+            // "clouds full-bright" bug. If worldTime is a day tick, the harness
+            // simply never switched to night and there is nothing to fix.
+            final net.minecraft.world.World w = Minecraft.getMinecraft().world;
+            final long wtime = (w != null) ? w.getWorldTime() : -1L;
+            String ccol = "n/a";
+            if (w != null) {
+                final net.minecraft.util.math.Vec3d cc = w.getCloudColour(1.0F);
+                ccol = String.format("(%.3f,%.3f,%.3f)", cc.x, cc.y, cc.z);
+            }
+            // Identify WHO is drawing. The 16-vertex POSITION_TEX_COLOR draws
+            // captured here are not the cloud layer (renderCloudsFast emits one
+            // 1024-vertex draw), so without a caller the trace is ambiguous.
+            if (cloudDiagDumps <= 14) {
+                final StringBuilder st = new StringBuilder("[VKPROF] DRAWTRACE #").append(cloudDiagDumps).append(" caller:");
+                int frames = 0;
+                for (StackTraceElement e : Thread.currentThread().getStackTrace()) {
+                    final String cn = e.getClassName();
+                    if (cn.startsWith("com.yuhan123.vulkanmod.mixin.vertex.TessellatorMixin")) continue;
+                    if (cn.startsWith("java.lang.Thread")) continue;
+                    st.append(' ').append(cn).append('.').append(e.getMethodName())
+                      .append(':').append(e.getLineNumber());
+                    if (++frames >= 5) break;
+                }
+                com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(st.toString());
+            }
             com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(String.format(
-                    "[VKPROF] DRAWTRACE #%d fmt=%s count=%d stride=%d v0pos=(%.1f,%.1f,%.1f) v0uv=(%.6f,%.6f) mvpT=(%.2f,%.2f,%.2f) cam=(%.1f,%.1f)",
+                    "[VKPROF] DRAWTRACE #%d fmt=%s count=%d stride=%d v0pos=(%.1f,%.1f,%.1f) v0uv=(%.6f,%.6f) vColor=(%d,%d,%d,%d) GLOBAL=(%.2f,%.2f,%.2f,%.2f) lmEnabled=%b worldTime=%d cloudColour=%s mvpT=(%.2f,%.2f,%.2f) cam=(%.1f,%.1f)",
                     cloudDiagDumps, vertexFormat, vertexCount, stride,
                     vertexData.getFloat(0), vertexData.getFloat(4), vertexData.getFloat(8), u0, v0,
+                    cr, cg, cb, ca,
+                    gcol[0], gcol[1], gcol[2], gcol[3], lmOn, wtime, ccol,
                     mvp.get(12), mvp.get(13), mvp.get(14), camX, camZ));
         }
 
         Renderer.getDrawer().draw(vertexData, buffer.getDrawMode(), vertexFormat, vertexCount);
+        } finally {
+            if (splashLock) {
+                com.yuhan123.vulkanmod.render.texture.ImageUploadHelper.LOCK.unlock();
+            }
+        }
     }
 
     private static int fbdbgDumps = 0;
+
+    /** CLOUD-DRAW-SEEN instrumentation budget. */
+    private static int cloudSeenLogs = 0;
 
     /**
      * CLOUD DIAGNOSTIC (CLOUDDIAG=1): confirm whether the cloud draw's

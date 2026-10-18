@@ -49,7 +49,22 @@ public abstract class Queue {
 
     public synchronized long submitCommands(CommandPool.CommandBuffer commandBuffer) {
         try (MemoryStack stack = stackPush()) {
-            return commandBuffer.submitCommands(stack, queue, false);
+            return commandBuffer.submitCommands(stack, queue, false, VK_NULL_HANDLE);
+        }
+    }
+
+    /**
+     * Submit with one wait semaphore.
+     *
+     * <p>Needed when a command buffer writes to the swapchain image the current
+     * frame is rendering into: the presentation engine may still be reading that
+     * image until the semaphore its acquire signalled has been waited on
+     * (Vulkan spec, VkSwapchainKHR "image acquire" synchronisation). Without the
+     * wait, any layout transition recorded here is an invalid usage.
+     */
+    public synchronized long submitCommands(CommandPool.CommandBuffer commandBuffer, long waitSemaphore) {
+        try (MemoryStack stack = stackPush()) {
+            return commandBuffer.submitCommands(stack, queue, false, waitSemaphore);
         }
     }
 

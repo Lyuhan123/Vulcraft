@@ -10,6 +10,7 @@ import com.yuhan123.vulkanmod.vulkan.texture.ImageUtil;
 import com.yuhan123.vulkanmod.vulkan.texture.SamplerManager;
 import com.yuhan123.vulkanmod.vulkan.texture.VTextureSelector;
 import com.yuhan123.vulkanmod.vulkan.texture.VulkanImage;
+import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import net.minecraft.util.IntHashMap;
 import org.jetbrains.annotations.Nullable;
 import org.jspecify.annotations.NonNull;
@@ -31,22 +32,69 @@ import static org.lwjgl.opengl.GL13.GL_TEXTURE0;
 import static org.lwjgl.vulkan.VK10.*;
 
 public class VkGlTexture {
-    private static int ID_COUNTER = 1;
+    private static final AtomicInteger ID_COUNTER = new AtomicInteger(1);
+
+    /**
+     * Texture objects are process-global (a GL texture object belongs to no
+     * thread), so the registry has to survive concurrent gen/bind/delete:
+     * Forge's splash thread generates its own four textures while the loading
+     * thread deletes and regenerates the atlas and every mod texture.
+     * Int2ReferenceOpenHashMap is not thread-safe, hence the lock.
+     */
     private static final Int2ReferenceOpenHashMap<VkGlTexture> map = new Int2ReferenceOpenHashMap<>();
-    private static int boundTextureId = 0;
+    private static final Object MAP_LOCK = new Object();
 
-
-
-    private static VkGlTexture boundTexture;
-    private static int activeTexture = 0;
-
-    public static int getBoundTextureId() {
-        return boundTextureId;
+    private static VkGlTexture mapGet(int id) {
+        synchronized (MAP_LOCK) {
+            return map.get(id);
+        }
     }
 
-    private static int unpackRowLength;
-    private static int unpackSkipRows;
-    private static int unpackSkipPixels;
+    private static void mapPut(int id, VkGlTexture texture) {
+        synchronized (MAP_LOCK) {
+            map.put(id, texture);
+        }
+    }
+
+    private static VkGlTexture mapRemove(int id) {
+        synchronized (MAP_LOCK) {
+            return map.remove(id);
+        }
+    }
+
+    /**
+     * Per-thread GL binding state.
+     *
+     * <p>Real OpenGL keeps the bound texture, the active texture unit and the
+     * UNPACK_* parameters in the <em>context</em>, and every thread has its own
+     * current context. This port drives two GL clients at once - Minecraft's
+     * loading thread and Forge's splash render thread - and they used to share
+     * one set of static fields. A splash-thread {@code glBindTexture} landing
+     * between the loader's {@code glBindTexture} and its {@code glTexImage2D}
+     * therefore redirected the loader's upload into the splash's texture, and
+     * into a mip level that texture does not have (a VkImage created with 1 mip
+     * level receiving a copy to mipLevel 4). That is an out-of-bounds
+     * {@code vkCmdCopyBufferToImage}: the GPU faults and the device is lost.
+     * Per-thread state restores real GL semantics and removes the race.
+     */
+    private static final class GlState {
+        VkGlTexture boundTexture;
+        int boundTextureId;
+        int activeTexture;
+        int unpackRowLength;
+        int unpackSkipRows;
+        int unpackSkipPixels;
+    }
+
+    private static final ThreadLocal<GlState> GL_STATE = ThreadLocal.withInitial(GlState::new);
+
+    private static GlState gl() {
+        return GL_STATE.get();
+    }
+
+    public static int getBoundTextureId() {
+        return gl().boundTextureId;
+    }
 
     /**
      * Mipmap chain for GL textures. MC asks for its configured mipmap level
@@ -89,9 +137,12 @@ public class VkGlTexture {
      * wait to every frame.
      */
     private static final java.util.Set<VulkanImage> MIP_REBUILD_PENDING =
-            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            java.util.Collections.synchronizedSet(java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
     private static final java.util.Set<VulkanImage> MIP_REBUILD_DONE =
-            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            java.util.Collections.synchronizedSet(java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()));
+
+    /** Throttle for the out-of-range upload warning in {@link Texture#uploadSubImage}. */
+    private static final AtomicInteger OOB_LOGGED = new AtomicInteger();
 
     /**
      * Rebuilds the mip chains queued by texture uploads. Called once per frame
@@ -103,7 +154,17 @@ public class VkGlTexture {
             return;
         }
 
-        for (VulkanImage image : MIP_REBUILD_PENDING) {
+        // Snapshot under the set's own monitor: uploads on either thread keep
+        // adding while the blits are being recorded, and iterating an
+        // IdentityHashMap that another thread is structurally modifying is
+        // undefined behaviour.
+        final VulkanImage[] pending;
+        synchronized (MIP_REBUILD_PENDING) {
+            pending = MIP_REBUILD_PENDING.toArray(new VulkanImage[0]);
+            MIP_REBUILD_PENDING.clear();
+        }
+
+        for (VulkanImage image : pending) {
             try {
                 com.yuhan123.vulkanmod.vulkan.texture.ImageUtil.generateMipmaps(image);
                 MIP_REBUILD_DONE.add(image);
@@ -112,7 +173,6 @@ public class VkGlTexture {
                         image.width, image.height, t.toString());
             }
         }
-        MIP_REBUILD_PENDING.clear();
     }
 
     private static void dilateTransparentRGB(ByteBuffer buf, int width, int height) {
@@ -188,25 +248,24 @@ public class VkGlTexture {
     }
 
     public static void bindIdToImage(int id, VulkanImage vulkanImage) {
-        VkGlTexture texture = map.get(id);
+        VkGlTexture texture = mapGet(id);
         texture.vulkanImage = vulkanImage;
     }
 
     public static int genTextureId() {
-        int id = ID_COUNTER;
-        map.put(id, new VkGlTexture(id));
-        ID_COUNTER++;
+        int id = ID_COUNTER.getAndIncrement();
+        mapPut(id, new VkGlTexture(id));
         return id;
     }
 
     public static void bindTexture(int id) {
-        boundTextureId = id;
-        boundTexture = map.get(id);
+        gl().boundTextureId = id;
+        gl().boundTexture = mapGet(id);
 
         if (id <= 0)
             return;
 
-        if (boundTexture == null) {
+        if (gl().boundTexture == null) {
             // TEMPORARY: this throw is the prime suspect for "the mob skin is
             // allocated and then never filled". TextureUtil.allocateTextureImpl
             // deletes and re-binds the id, then uploadTextureImageSub binds it
@@ -215,7 +274,7 @@ public class VkGlTexture {
             throw new NullPointerException("bound texture is null" + id);
         }
 
-        VulkanImage vulkanImage = boundTexture.vulkanImage;
+        VulkanImage vulkanImage = gl().boundTexture.vulkanImage;
         if (vulkanImage != null) {
             // The ender-crystal healing beam texture is 16x256 and scrolls its V
             // coordinate far negative over time (RenderDragon.renderCrystalBeams
@@ -224,14 +283,14 @@ public class VkGlTexture {
             // to CLAMP_TO_EDGE, which would pin the beam to V=0 (alpha 0) and make
             // it invisible. Force REPEAT on it so the soft alpha gradient wraps and
             // shows. 16x256 is the beam's signature size; no other MC texture uses it.
-            if (boundTexture.width == 16 && boundTexture.height == 256 && boundTexture.clamp) {
-                boundTexture.clamp = false;
-                boundTexture.updateSampler();
+            if (gl().boundTexture.width == 16 && gl().boundTexture.height == 256 && gl().boundTexture.clamp) {
+                gl().boundTexture.clamp = false;
+                gl().boundTexture.updateSampler();
             }
             // 1.12.2 binds the lightmap at GL_TEXTURE1 (OpenGlHelper.lightmapTexUnit = 33985),
             // but the block/item/entity shaders all sample it from slot 2 (Sampler2 ->
             // imageIdx 2). Publish it there so those shaders get real lighting.
-            if (activeTexture == 1) {
+            if (gl().activeTexture == 1) {
                 VTextureSelector.setLightTexture(vulkanImage);
             }
 
@@ -245,8 +304,8 @@ public class VkGlTexture {
             // full bright" defect: an attacked mob's setBrightness() binds the white
             // TEXTURE_BRIGHTNESS onto unit 2, overwriting the lightmap, and
             // unsetBrightness() never restores it.
-            if (activeTexture != 2) {
-                VTextureSelector.bindTexture(activeTexture, vulkanImage);
+            if (gl().activeTexture != 2) {
+                VTextureSelector.bindTexture(gl().activeTexture, vulkanImage);
             }
         } else {
         }
@@ -270,15 +329,15 @@ public class VkGlTexture {
     private static boolean shadowClampReported = false;
 
     public static void vulkanmod$clampShadowTexture() {
-        if (boundTexture == null) {
+        if (gl().boundTexture == null) {
             return;
         }
         if (!shadowClampReported) {
             shadowClampReported = true;
             com.yuhan123.vulkanmod.VKProf.info("[VKPROF] shadow texture id={} {}x{} clamp={} minFilter={} magFilter={} maxLevel={} mipLevels={}",
-                    boundTexture.id, boundTexture.width, boundTexture.height, boundTexture.clamp,
-                    boundTexture.minFilter, boundTexture.magFilter, boundTexture.maxLevel,
-                    boundTexture.vulkanImage == null ? -1 : boundTexture.vulkanImage.mipLevels);
+                    gl().boundTexture.id, gl().boundTexture.width, gl().boundTexture.height, gl().boundTexture.clamp,
+                    gl().boundTexture.minFilter, gl().boundTexture.magFilter, gl().boundTexture.maxLevel,
+                    gl().boundTexture.vulkanImage == null ? -1 : gl().boundTexture.vulkanImage.mipLevels);
         }
         texParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         texParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -291,7 +350,7 @@ public class VkGlTexture {
     }
 
     public static void glDeleteTextures(int i) {
-        VkGlTexture glTexture = map.remove(i);
+        VkGlTexture glTexture = mapRemove(i);
         VulkanImage image = glTexture != null ? glTexture.vulkanImage : null;
         if (image != null) {
             // TEMPORARY: the delete path frees the image but leaves any sampler
@@ -305,30 +364,43 @@ public class VkGlTexture {
         if (id == 0)
             return null;
 
-        return map.get(id);
+        return mapGet(id);
     }
 
     public static void activeTexture(int i) {
-        activeTexture = i - GL_TEXTURE0;
-        VTextureSelector.setActiveTexture(activeTexture);
+        gl().activeTexture = i - GL_TEXTURE0;
+        VTextureSelector.setActiveTexture(gl().activeTexture);
     }
 
     /** TEMPORARY diagnostic accessor for the texture probe. */
     public static int getActiveTextureIndex() {
-        return activeTexture;
+        return gl().activeTexture;
     }
 
     public static void texImage2D(int target, int level, int internalFormat, int width, int height, int border, int format, int type, long pixels) {
         if (checkParams(level, width, height))
             return;
 
+        // GL_PROXY_TEXTURE_2D is a no-op query in real OpenGL (it never actually
+        // allocates a texture); the renderer tracks no proxy texture, so treat it
+        // as a no-op. Used by Forge SplashProgress / some mods to probe max size.
+        if (target == GL11.GL_PROXY_TEXTURE_2D)
+            return;
+
+        // Real OpenGL tolerates glTexImage2D with no texture bound (it just sets
+        // a GL error). JEI's JeiTextureMap calls getGLMaximumTextureSize() ->
+        // Forge SplashProgress.getMaxTextureSize() -> glTexImage2D with no bound
+        // texture; dereferencing null here would crash. Guard like texParameteri.
+        if (gl().boundTexture == null)
+            return;
+
         // TEMPORARY: report the ALLOCATE step. uploadSubImage only fires when
         // bytes are written, so an image that is allocated and then never filled
 
-        boundTexture.updateParams(level, width, height, internalFormat, type);
-        boundTexture.allocateIfNeeded();
+        gl().boundTexture.updateParams(level, width, height, internalFormat, type);
+        gl().boundTexture.allocateIfNeeded();
 
-        VTextureSelector.bindTexture(activeTexture, boundTexture.vulkanImage);
+        VTextureSelector.bindTexture(gl().activeTexture, gl().boundTexture.vulkanImage);
 
         texSubImage2D(target, level, 0, 0, width, height, format, type, pixels);
     }
@@ -337,11 +409,23 @@ public class VkGlTexture {
         if (checkParams(level, width, height))
             return;
 
+        // GL_PROXY_TEXTURE_2D is a no-op query in real OpenGL (it never actually
+        // allocates a texture); the renderer tracks no proxy texture, so treat it
+        // as a no-op. Used by Forge SplashProgress / some mods to probe max size.
+        if (target == GL11.GL_PROXY_TEXTURE_2D)
+            return;
 
-        boundTexture.updateParams(level, width, height, internalFormat, type);
-        boundTexture.allocateIfNeeded();
+        // Real OpenGL tolerates glTexImage2D with no texture bound (it just sets
+        // a GL error). JEI's JeiTextureMap calls getGLMaximumTextureSize() ->
+        // Forge SplashProgress.getMaxTextureSize() -> glTexImage2D with no bound
+        // texture; dereferencing null here would crash. Guard like texParameteri.
+        if (gl().boundTexture == null)
+            return;
 
-        VTextureSelector.bindTexture(activeTexture, boundTexture.vulkanImage);
+        gl().boundTexture.updateParams(level, width, height, internalFormat, type);
+        gl().boundTexture.allocateIfNeeded();
+
+        VTextureSelector.bindTexture(gl().activeTexture, gl().boundTexture.vulkanImage);
 
         texSubImage2D(target, level, 0, 0, width, height, format, type, pixels);
     }
@@ -373,7 +457,7 @@ public class VkGlTexture {
         }
 
         if (src != null) {
-            boundTexture.uploadSubImage(level, xOffset, yOffset, width, height, format, src);
+            gl().boundTexture.uploadSubImage(level, xOffset, yOffset, width, height, format, src);
         } else {
         }
     }
@@ -400,7 +484,7 @@ public class VkGlTexture {
         }
 
         if (src != null) {
-            boundTexture.uploadSubImage(level, xOffset, yOffset, width, height, format, src);
+            gl().boundTexture.uploadSubImage(level, xOffset, yOffset, width, height, format, src);
         } else {
         }
     }
@@ -409,9 +493,9 @@ public class VkGlTexture {
         ByteBuffer src;
         // TODO: hardcoded format size
         int formatSize = 4;
-        int rowLength = unpackRowLength != 0 ? unpackRowLength : width;
-        int offset = (unpackSkipRows * rowLength + unpackSkipPixels) * formatSize;
-        src = MemoryUtil.memByteBuffer(pixels + offset, (rowLength * height - unpackSkipPixels) * formatSize);
+        int rowLength = gl().unpackRowLength != 0 ? gl().unpackRowLength : width;
+        int offset = (gl().unpackSkipRows * rowLength + gl().unpackSkipPixels) * formatSize;
+        src = MemoryUtil.memByteBuffer(pixels + offset, (rowLength * height - gl().unpackSkipPixels) * formatSize);
         return src;
     }
 
@@ -434,7 +518,7 @@ public class VkGlTexture {
         }
 
         if (src != null) {
-            boundTexture.uploadSubImage(level, xOffset, yOffset, width, height, format, src);
+            gl().boundTexture.uploadSubImage(level, xOffset, yOffset, width, height, format, src);
         } else {
         }
     }
@@ -443,7 +527,7 @@ public class VkGlTexture {
         if (target != GL11.GL_TEXTURE_2D)
             throw new UnsupportedOperationException("target != GL_TEXTURE_2D not supported");
 
-        if (boundTexture == null)
+        if (gl().boundTexture == null)
             return;
 
         switch (pName) {
@@ -453,15 +537,15 @@ public class VkGlTexture {
             // its configured mipmap level, and without them every texture stays
             // single-level: distant terrain is then sampled from mip 0 with no
             // minification, which both moires and thrashes the texture cache.
-            case 33085 -> { if (MIP_ENABLED) boundTexture.setMaxLevel(param); }  // GL_TEXTURE_MAX_LEVEL
-            case 33083 -> { if (MIP_ENABLED) boundTexture.setMaxLod(param); }    // GL_TEXTURE_MAX_LOD
+            case 33085 -> { if (MIP_ENABLED) gl().boundTexture.setMaxLevel(param); }  // GL_TEXTURE_MAX_LEVEL
+            case 33083 -> { if (MIP_ENABLED) gl().boundTexture.setMaxLod(param); }    // GL_TEXTURE_MAX_LOD
             case 33082 -> {}                                                     // GL_TEXTURE_MIN_LOD
 //            case GL30.GL_TEXTURE_LOD_BIAS -> {}
 
-            case GL11.GL_TEXTURE_MAG_FILTER -> boundTexture.setMagFilter(param);
-            case GL11.GL_TEXTURE_MIN_FILTER -> boundTexture.setMinFilter(param);
+            case GL11.GL_TEXTURE_MAG_FILTER -> gl().boundTexture.setMagFilter(param);
+            case GL11.GL_TEXTURE_MIN_FILTER -> gl().boundTexture.setMinFilter(param);
 
-            case GL11.GL_TEXTURE_WRAP_S, GL11.GL_TEXTURE_WRAP_T -> boundTexture.setClamp(param);
+            case GL11.GL_TEXTURE_WRAP_S, GL11.GL_TEXTURE_WRAP_T -> gl().boundTexture.setClamp(param);
 
             default -> {}
         }
@@ -473,35 +557,49 @@ public class VkGlTexture {
         if (target != GL11.GL_TEXTURE_2D)
             throw new UnsupportedOperationException("target != GL_TEXTURE_2D not supported");
 
-        if (boundTexture == null)
+        if (gl().boundTexture == null)
             return -1;
 
         return switch (pName) {
-            case GL11.GL_TEXTURE_INTERNAL_FORMAT -> GlUtil.getGlFormat(boundTexture.vulkanImage.format);
-            case GL11.GL_TEXTURE_WIDTH -> boundTexture.vulkanImage.width;
-            case GL11.GL_TEXTURE_HEIGHT -> boundTexture.vulkanImage.height;
+            case GL11.GL_TEXTURE_INTERNAL_FORMAT -> GlUtil.getGlFormat(gl().boundTexture.vulkanImage.format);
+            case GL11.GL_TEXTURE_WIDTH -> gl().boundTexture.vulkanImage.width;
+            case GL11.GL_TEXTURE_HEIGHT -> gl().boundTexture.vulkanImage.height;
 
-//            case GL30.GL_TEXTURE_MAX_LEVEL -> boundTexture.maxLevel;
-//            case GL30.GL_TEXTURE_MAX_LOD -> boundTexture.maxLod;
+//            case GL30.GL_TEXTURE_MAX_LEVEL -> gl().boundTexture.maxLevel;
+//            case GL30.GL_TEXTURE_MAX_LOD -> gl().boundTexture.maxLod;
 
-            case GL11.GL_TEXTURE_MAG_FILTER -> boundTexture.magFilter;
-            case GL11.GL_TEXTURE_MIN_FILTER -> boundTexture.minFilter;
+            case GL11.GL_TEXTURE_MAG_FILTER -> gl().boundTexture.magFilter;
+            case GL11.GL_TEXTURE_MIN_FILTER -> gl().boundTexture.minFilter;
 
             default -> -1;
         };
     }
 
     public static int getTexLevelParameter(int target, int level, int pName) {
+        // GL_PROXY_TEXTURE_2D queries (Forge SplashProgress / some mods probing
+        // max texture size) answer from the last proxy specification in real
+        // OpenGL. We track no proxy texture, so answer the device limit for size
+        // queries and a sane default otherwise — crash-free. Note: getGLMaximum-
+        // TextureSize() is now @Overwritten to return the device limit directly,
+        // so this path is only reached if another caller uses proxy targets.
+        if (target == GL11.GL_PROXY_TEXTURE_2D) {
+            return switch (pName) {
+                case GL11.GL_TEXTURE_WIDTH, GL11.GL_TEXTURE_HEIGHT -> VRenderSystem.maxSupportedTextureSize();
+                case GL11.GL_TEXTURE_INTERNAL_FORMAT -> GL11.GL_RGBA;
+                default -> -1;
+            };
+        }
+
         if (target != GL11.GL_TEXTURE_2D)
             throw new UnsupportedOperationException("target != GL_TEXTURE_2D not supported");
 
-        if (boundTexture == null)
+        if (gl().boundTexture == null)
             return -1;
 
         return switch (pName) {
-            case GL11.GL_TEXTURE_INTERNAL_FORMAT -> GlUtil.getGlFormat(boundTexture.vulkanImage.format);
-            case GL11.GL_TEXTURE_WIDTH -> boundTexture.vulkanImage.width;
-            case GL11.GL_TEXTURE_HEIGHT -> boundTexture.vulkanImage.height;
+            case GL11.GL_TEXTURE_INTERNAL_FORMAT -> GlUtil.getGlFormat(gl().boundTexture.vulkanImage.format);
+            case GL11.GL_TEXTURE_WIDTH -> gl().boundTexture.vulkanImage.width;
+            case GL11.GL_TEXTURE_HEIGHT -> gl().boundTexture.vulkanImage.height;
 
             default -> -1;
         };
@@ -509,9 +607,9 @@ public class VkGlTexture {
 
     public static void pixelStoreI(int pName, int value) {
         switch (pName) {
-            case GL11.GL_UNPACK_ROW_LENGTH -> unpackRowLength = value;
-            case GL11.GL_UNPACK_SKIP_ROWS -> unpackSkipRows = value;
-            case GL11.GL_UNPACK_SKIP_PIXELS -> unpackSkipPixels = value;
+            case GL11.GL_UNPACK_ROW_LENGTH -> gl().unpackRowLength = value;
+            case GL11.GL_UNPACK_SKIP_ROWS -> gl().unpackSkipRows = value;
+            case GL11.GL_UNPACK_SKIP_PIXELS -> gl().unpackSkipPixels = value;
         }
     }
 
@@ -526,20 +624,20 @@ public class VkGlTexture {
         // mod does call it. Without mips being sampled at all - which was the
         // real bug, see updateSampler() - distant terrain moires and thrashes
         // the texture cache.
-        if (MIP_ENABLED && boundTexture != null && boundTexture.vulkanImage != null
-                && boundTexture.vulkanImage.mipLevels > 1) {
+        if (MIP_ENABLED && gl().boundTexture != null && gl().boundTexture.vulkanImage != null
+                && gl().boundTexture.vulkanImage.mipLevels > 1) {
             if (!MIP_LOGGED) {
                 MIP_LOGGED = true;
                 com.yuhan123.vulkanmod.VKProf.info("[VKPROF] mipmap: generating {} levels for {}x{}",
-                        boundTexture.vulkanImage.mipLevels,
-                        boundTexture.vulkanImage.width, boundTexture.vulkanImage.height);
+                        gl().boundTexture.vulkanImage.mipLevels,
+                        gl().boundTexture.vulkanImage.width, gl().boundTexture.vulkanImage.height);
             }
-            boundTexture.generateMipmaps();
+            gl().boundTexture.generateMipmaps();
         }
     }
 
     public static void getTexImage(int tex, int level, int format, int type, long pixels) {
-        VulkanImage image = boundTexture.vulkanImage;
+        VulkanImage image = gl().boundTexture.vulkanImage;
 
         VkGlBuffer buffer = VkGlBuffer.getPixelPackBufferBound();
         long ptr;
@@ -556,13 +654,13 @@ public class VkGlTexture {
     }
 
     public static void setVulkanImage(int id, VulkanImage vulkanImage) {
-        VkGlTexture texture = map.get(id);
+        VkGlTexture texture = mapGet(id);
 
         texture.vulkanImage = vulkanImage;
     }
 
     public static VkGlTexture getBoundTexture() {
-        return boundTexture;
+        return gl().boundTexture;
     }
 
     public final int id;
@@ -691,12 +789,31 @@ public class VkGlTexture {
             }
         }
 
+        // An upload above the image's mip chain is an application error that a
+        // real driver answers with GL_INVALID_VALUE. Recording the copy anyway
+        // is an out-of-bounds vkCmdCopyBufferToImage, which faults the GPU and
+        // loses the device - so drop it instead. updateParams/allocateIfNeeded
+        // are supposed to have grown the chain to maxLevel+1 before this point;
+        // reaching here means that invariant was broken (it used to be broken
+        // routinely by the shared static bind state).
+        if (level >= vulkanImage.mipLevels) {
+            if (OOB_LOGGED.incrementAndGet() <= 3) {
+                com.yuhan123.vulkanmod.VKProf.warn(
+                        "[VKPROF] dropped out-of-range texture upload: GlTexture {} mipLevel {} >= {} mip levels ({}x{})",
+                        id, level, vulkanImage.mipLevels, vulkanImage.width, vulkanImage.height);
+            }
+            if (src != pixels) {
+                MemoryUtil.memFree(src);
+            }
+            return;
+        }
+
         // TEMPORARY: report what the upload actually contains. A mob that binds
         // the right image and a white ColorModulator but still draws black can
         // only be explained by the bytes: zeroes, or a layout the sampler cannot
 
         final long upT = FrameProfiler.texStart();
-        this.vulkanImage.uploadSubTextureAsync(level, width, height, xOffset, yOffset, 0, 0, unpackRowLength, src);
+        this.vulkanImage.uploadSubTextureAsync(level, width, height, xOffset, yOffset, 0, 0, gl().unpackRowLength, src);
         FrameProfiler.addTextureUpload(upT);
         FrameProfiler.onTextureUpload(src.remaining());
 

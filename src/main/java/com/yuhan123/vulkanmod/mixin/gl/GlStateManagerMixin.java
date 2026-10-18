@@ -8,6 +8,8 @@ import com.yuhan123.vulkanmod.gl.VkGlBuffer;
 import com.yuhan123.vulkanmod.gl.VkGlTexture;
 import com.yuhan123.vulkanmod.render.PipelineManager;
 import com.yuhan123.vulkanmod.render.shader.ShaderInstance;
+import com.yuhan123.vulkanmod.render.texture.ImageUploadHelper;
+import com.yuhan123.vulkanmod.vulkan.Drawer;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
 import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import java.nio.ByteBuffer;
@@ -335,14 +337,30 @@ public class GlStateManagerMixin {
 
    @Overwrite
    public static void enableColorMaterial() {
+      // GL_COLOR_MATERIAL: the material's ambient/diffuse (per colorMaterial's
+      // mode) now track the current vertex colour instead of the glMaterial
+      // values. Vanilla's only user is RenderHelper.enableStandardItemLighting,
+      // which pairs this with colorMaterial(GL_FRONT_AND_BACK,
+      // GL_AMBIENT_AND_DIFFUSE) - "the material colour IS the vertex colour".
+      // The item shader resolves the tracking itself, because the vertex colour
+      // it needs is only available per draw (see VRenderSystem.colorMaterialTracking).
+      VRenderSystem.colorMaterialEnabled = true;
+      VRenderSystem.bumpUniformVersion();
    }
 
    @Overwrite
    public static void disableColorMaterial() {
+      VRenderSystem.colorMaterialEnabled = false;
+      VRenderSystem.bumpUniformVersion();
    }
 
    @Overwrite
    public static void colorMaterial(int p_179104_0_, int p_179104_1_) {
+      // GL keeps the face/mode even while GL_COLOR_MATERIAL is off; only the
+      // enable bit decides whether they are honoured.
+      VRenderSystem.colorMaterialFace = p_179104_0_;
+      VRenderSystem.colorMaterialMode = p_179104_1_;
+      VRenderSystem.bumpUniformVersion();
    }
 
    @Overwrite
@@ -375,6 +393,21 @@ public class GlStateManagerMixin {
 
    @Overwrite
    public static void glLightModel(int p_187424_0_, FloatBuffer p_187424_1_) {
+      // Only GL_LIGHT_MODEL_AMBIENT (2899) carries a value the port uses: it is
+      // the ambient term of the fixed-function material equation, which the item
+      // shader previously hardcoded at 0.4. Vanilla sets exactly 0.4 in both
+      // lighting setups, so honouring the call keeps those paths identical while
+      // a mod that picks a different ambient now takes effect.
+      // GL_LIGHT_MODEL_TWO_SIDE (2888) and GL_LIGHT_MODEL_LOCAL_VIEWER (2887)
+      // are not modelled (see the FRONT-face-only note in VRenderSystem).
+      if (p_187424_0_ == 2899 && p_187424_1_ != null && p_187424_1_.remaining() >= 4) {
+         int pos = p_187424_1_.position();
+         java.nio.FloatBuffer view = java.nio.FloatBuffer.allocate(4);
+         for (int i = 0; i < 4; i++) {
+            view.put(i, p_187424_1_.get(pos + i));
+         }
+         VRenderSystem.setLightModelAmbient(view);
+      }
    }
 
    @Overwrite
@@ -478,18 +511,28 @@ public class GlStateManagerMixin {
 
    @Overwrite
    public static void enableTexGenCoord(TexGen p_179087_0_) {
+      com.yuhan123.vulkanmod.vulkan.VRenderSystem.setTexGenCoordEnabled(p_179087_0_.ordinal(), true);
    }
 
    @Overwrite
    public static void disableTexGenCoord(TexGen p_179100_0_) {
+      com.yuhan123.vulkanmod.vulkan.VRenderSystem.setTexGenCoordEnabled(p_179100_0_.ordinal(), false);
    }
 
    @Overwrite
    public static void texGen(TexGen p_179149_0_, int p_179149_1_) {
+      // 9216 = GL_EYE_LINEAR, 9217 = GL_OBJECT_LINEAR, 8448 = GL_SPHERE_MAP.
+      com.yuhan123.vulkanmod.vulkan.VRenderSystem.setTexGenMode(p_179149_0_.ordinal(), p_179149_1_);
    }
 
    @Overwrite
    public static void texGen(TexGen p_179105_0_, int p_179105_1_, FloatBuffer p_179105_2_) {
+      // 9474 = GL_EYE_PLANE, 9475 = GL_OBJECT_PLANE. Only the eye planes are
+      // consumed by the shader (see VRenderSystem's texGen block); storing the
+      // object planes too keeps the state complete.
+      if (p_179105_1_ == 9474 || p_179105_1_ == 9475) {
+         com.yuhan123.vulkanmod.vulkan.VRenderSystem.  setTexGenPlane(p_179105_0_.ordinal(), p_179105_2_);
+      }
    }
 
    @Overwrite
@@ -840,39 +883,61 @@ public class GlStateManagerMixin {
    public static void glEnd() {
       int mode = captureMode;
       captureMode = 0;
-      if (mode == 5 || mode == 6 || mode == 7) {
+      // 4 = GL_TRIANGLES (the most common immediate-mode primitive); the capture
+      // path builds POSITION_TEX verts and forwards the GL mode to Drawer.draw,
+      // which already handles triangle lists for chunk rendering.
+      if (mode == 4 || mode == 5 || mode == 6 || mode == 7) {
          if (captureCount >= 4) {
             if (Renderer.isRecording()) {
-               ShaderInstance shader = PipelineManager.chooseShader(DefaultVertexFormats.POSITION_TEX);
-               if (shader != null && shader.getPipeline() != null) {
-                  int vertexCount = captureCount;
-                  int bytes = vertexCount * 20;
+               // The whole chooseShader -> apply -> draw sequence has to exclude
+               // the main thread's frame transitions: apply() uploads into the
+               // per-frame uniform buffer and the draw binds it, both of which
+               // Renderer.beginFrame() rewinds. SplashPresenter.begin/end cover
+               // the vanilla splash loop, but coremod loading-screen mods
+               // (CustomLoadingScreen) rewrite that loop and the injections do
+               // not survive, so the lock is taken here as well. Reentrant with
+               // begin/end and with Drawer's own entry-point locks; a no-op
+               // during normal play.
+               final boolean splashLock = Drawer.splashPresenting();
+               if (splashLock) {
+                  ImageUploadHelper.LOCK.lock();
+               }
+               try {
+                  ShaderInstance shader = PipelineManager.chooseShader(DefaultVertexFormats.POSITION_TEX);
+                  if (shader != null && shader.getPipeline() != null) {
+                     int vertexCount = captureCount;
+                     int bytes = vertexCount * 20;
 
-                  // Reuse the scratch buffer across glEnd calls instead of
-                  // allocating/freeing native memory on every single one.
-                  if (captureBuffer == null || captureBuffer.capacity() < bytes) {
-                     if (captureBuffer != null) {
-                        MemoryUtil.memFree(captureBuffer);
+                     // Reuse the scratch buffer across glEnd calls instead of
+                     // allocating/freeing native memory on every single one.
+                     if (captureBuffer == null || captureBuffer.capacity() < bytes) {
+                        if (captureBuffer != null) {
+                           MemoryUtil.memFree(captureBuffer);
+                        }
+                        captureBuffer = MemoryUtil.memAlloc(bytes);
                      }
-                     captureBuffer = MemoryUtil.memAlloc(bytes);
+
+                     ByteBuffer data = captureBuffer;
+                     data.clear();
+
+                     for (int i = 0, o = 0; i < vertexCount; ++i, o += 5) {
+                        data.putFloat(captureData[o]);
+                        data.putFloat(captureData[o + 1]);
+                        data.putFloat(captureData[o + 2]);
+                        data.putFloat(captureData[o + 3]);
+                        data.putFloat(captureData[o + 4]);
+                     }
+
+                     data.flip();
+                     shader.apply();
+                     Renderer renderer = Renderer.getInstance();
+                     if (renderer.getBoundPipeline() != null) {
+                        Renderer.getDrawer().draw(data, mode, DefaultVertexFormats.POSITION_TEX, vertexCount);
+                     }
                   }
-
-                  ByteBuffer data = captureBuffer;
-                  data.clear();
-
-                  for (int i = 0, o = 0; i < vertexCount; ++i, o += 5) {
-                     data.putFloat(captureData[o]);
-                     data.putFloat(captureData[o + 1]);
-                     data.putFloat(captureData[o + 2]);
-                     data.putFloat(captureData[o + 3]);
-                     data.putFloat(captureData[o + 4]);
-                  }
-
-                  data.flip();
-                  shader.apply();
-                  Renderer renderer = Renderer.getInstance();
-                  if (renderer.getBoundPipeline() != null) {
-                     Renderer.getDrawer().draw(data, mode, DefaultVertexFormats.POSITION_TEX, vertexCount);
+               } finally {
+                  if (splashLock) {
+                     ImageUploadHelper.LOCK.unlock();
                   }
                }
             }

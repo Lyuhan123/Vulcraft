@@ -1,6 +1,7 @@
 package com.yuhan123.vulkanmod.vulkan;
 
 import com.yuhan123.vulkanmod.config.VulkanModConfig;
+import com.yuhan123.vulkanmod.VulkanMod;
 import com.yuhan123.vulkanmod.render.PipelineManager;
 import com.yuhan123.vulkanmod.render.chunk.buffer.UploadManager;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
@@ -42,10 +43,13 @@ import java.util.List;
 import java.util.Set;
 
 import static com.yuhan123.vulkanmod.vulkan.Vulkan.*;
+import static org.lwjgl.glfw.GLFW.GLFW_ICONIFIED;
+import static org.lwjgl.glfw.GLFW.glfwGetWindowAttrib;
 import static org.lwjgl.opengl.GL11.GL_COLOR_BUFFER_BIT;
 import static org.lwjgl.opengl.GL11.GL_DEPTH_BUFFER_BIT;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.EXTDebugUtils.*;
+import static org.lwjgl.vulkan.KHRSurface.VK_ERROR_SURFACE_LOST_KHR;
 import static org.lwjgl.vulkan.KHRSwapchain.*;
 import static org.lwjgl.vulkan.VK10.*;
 
@@ -56,6 +60,14 @@ public class Renderer {
 
     private static boolean swapChainUpdate = false;
     public static boolean skipRendering = false;
+
+    /**
+     * GLFW window handle, used to poll the iconify state (see
+     * {@link #installWindowCallbacks}). 0 until {@link Vulkan#initVulkan} runs.
+     */
+    private static long glfwWindow = 0L;
+    /** Last observed {@code GLFW_ICONIFIED} state, so only transitions rebuild. */
+    private static boolean windowIconified = false;
 
     public static void initRenderer() {
         INSTANCE = new Renderer();
@@ -76,6 +88,32 @@ public class Renderer {
 
     public static int getCurrentImage() {
         return imageIndex;
+    }
+
+    /**
+     * Semaphore signalled by the acquire of the swapchain image the currently
+     * open frame is rendering into, or {@code VK_NULL_HANDLE} when no frame is
+     * open.
+     *
+     * <p>Any submit that <em>writes</em> to that image has to wait on it first:
+     * until the wait completes the presentation engine may still be reading the
+     * image, and the Vulkan spec requires a synchronisation primitive between
+     * the acquire and the first write. {@code ImageUtil.downloadTexture} hits
+     * exactly this when it reads the swapchain image back for a screenshot -
+     * its layout transition to TRANSFER_SRC_OPTIMAL is a write.
+     *
+     * <p>Consuming: a binary semaphore's signal operation is one-shot, so only
+     * one submit may wait on it. Once it has been waited on (here or by
+     * {@link #submitFrame()}) the dependency is established on the GPU and
+     * every later submit on the same queue is ordered behind it by queue order,
+     * so it must not be handed out again.
+     */
+    public long takeCurrentAcquireSemaphore() {
+        if (!recordingCmds || skipRendering || !acquireSemaphorePending || imageAvailableSemaphores == null) {
+            return VK_NULL_HANDLE;
+        }
+        acquireSemaphorePending = false;
+        return imageAvailableSemaphores.get(currentFrame);
     }
 
     private final Set<Pipeline> usedPipelines = new ObjectOpenHashSet<>();
@@ -104,6 +142,14 @@ public class Renderer {
     private ArrayList<Long> imageAvailableSemaphores;
     private ArrayList<Long> renderFinishedSemaphores;
     private ArrayList<Long> inFlightFences;
+
+    /**
+     * True while {@link #imageAvailableSemaphores}' entry for {@link #currentFrame}
+     * still carries an unconsumed acquire signal. Set by the acquire in
+     * {@link #beginFrame()}, cleared by whichever submit waits on it first -
+     * {@link #submitFrame()} or a swapchain-image readback.
+     */
+    private boolean acquireSemaphorePending;
     // The fence of the frame that last rendered each swapchain image
     // (per-image sync prevents semaphore/fence reuse validation warnings and stalls)
     private long[] imagesInFlight;
@@ -483,17 +529,39 @@ public class Renderer {
 //        p.pop();
 //        p.push("Frame_fence");
 
+        // Window minimise / restore. The iconified state used to be noticed
+        // only indirectly, through vkAcquireNextImageKHR returning
+        // VK_ERROR_OUT_OF_DATE_KHR once the surface extent had already dropped
+        // to 0x0. That is far too late and also self-limiting: after the
+        // swapchain has been destroyed for the 0x0 extent nothing acquires or
+        // presents any more, so no further OUT_OF_DATE can arrive and the
+        // restore is never noticed either - the game stayed black until an
+        // unrelated vsync toggle forced a rebuild.
+        if (glfwWindow != 0L) {
+            final boolean iconified = glfwGetWindowAttrib(glfwWindow, GLFW_ICONIFIED) != 0;
+            if (iconified != windowIconified) {
+                windowIconified = iconified;
+                VulkanMod.LOGGER.info("[VKPROF] window {} - scheduling swapchain rebuild",
+                        iconified ? "minimised" : "restored");
+                swapChainUpdate = true;
+            }
+        }
+
         if (swapChainUpdate) {
             recreateSwapChain();
             swapChainUpdate = false;
 
-            if (getSwapChain().getWidth() == 0 && getSwapChain().getHeight() == 0) {
-                skipRendering = true;
-//                Minecraft.getInstance().noRender = true;
-            } else {
-                skipRendering = false;
-//                Minecraft.getInstance().noRender = false;
-            }
+            // An iconified window has no presentable surface. Key this off the
+            // iconify flag and not only off the extent: a driver is free to
+            // keep reporting the old currentExtent while minimised, and
+            // rendering into that swapchain is exactly what crashes the
+            // display driver. With skipRendering set, beginFrame returns
+            // before the render pass is opened - and every recording entry
+            // point (Drawer, VboRenderListMixin) refuses to record while no
+            // pass is open, because MC's render loop keeps calling into the
+            // renderer with no idea the swapchain is gone.
+            skipRendering = windowIconified
+                    || (getSwapChain().getWidth() == 0 && getSwapChain().getHeight() == 0);
         }
 
 
@@ -526,8 +594,17 @@ public class Renderer {
         // is still open and still references this buffer - leave it alone and
         // let it be flushed normally (it grows until the staging buffer wraps,
         // which flushes it).
-        if (!ImageUploadHelper.INSTANCE.hasPendingCommands()) {
-            Vulkan.getStagingBuffer().reset();
+        // The reset has to exclude an in-flight upload recording: the Forge
+        // splash frames from a second thread while the loading thread still
+        // uploads, so "no pending batch" alone is not enough (the batch could be
+        // opened right after the check). Same lock as ImageUploadHelper.
+        ImageUploadHelper.LOCK.lock();
+        try {
+            if (!ImageUploadHelper.INSTANCE.hasPendingCommands()) {
+                Vulkan.getStagingBuffer().reset();
+            }
+        } finally {
+            ImageUploadHelper.LOCK.unlock();
         }
 
 //        p.pop();
@@ -535,6 +612,20 @@ public class Renderer {
 
         MemoryManager.getInstance().initFrame(currentFrame);
         drawer.setCurrentFrame(currentFrame);
+
+        // Rewind this frame slot's vertex/index/uniform buffers here as well as
+        // in preInitFrame(). preInitFrame() is driven from Minecraft.runTick,
+        // which does not run while FML is loading - there the only caller of
+        // begin/endFrame is SplashPresenter.presentFromMainThread(), so nothing
+        // rewound the buffers and every splash draw appended another uniform
+        // slice to the same slot. usedBytes then climbed to the buffer's size,
+        // checkCapacity() resized it, and the descriptor set - compared against
+        // the pre-resize buffer id - kept pointing at the old, smaller buffer
+        // while the dynamic offset had already run past its end
+        // (VUID-vkCmdBindDescriptorSets-pDescriptorSets-01979).
+        // In the game loop preInitFrame() has just done this, so the second
+        // reset is a no-op (three usedBytes = 0 writes, nothing recorded yet).
+        drawer.resetBuffers(currentFrame);
 
         resetDescriptors();
 
@@ -550,7 +641,13 @@ public class Renderer {
                                                  imageAvailableSemaphores.get(currentFrame), VK_NULL_HANDLE, pImageIndex);
             FrameProfiler.endFenceWait();
 
-            if (vkResult == VK_SUBOPTIMAL_KHR || vkResult == VK_ERROR_OUT_OF_DATE_KHR || swapChainUpdate) {
+            // VK_ERROR_SURFACE_LOST_KHR is grouped with the out-of-date codes:
+            // it means "the swapchain can no longer be used", which is all the
+            // rebuild path needs to know. Letting it fall through to the
+            // RuntimeException below turned a recoverable surface loss (some
+            // drivers report it on minimise) into a hard crash.
+            if (vkResult == VK_SUBOPTIMAL_KHR || vkResult == VK_ERROR_OUT_OF_DATE_KHR
+                    || vkResult == VK_ERROR_SURFACE_LOST_KHR || swapChainUpdate) {
                 swapChainUpdate = true;
                 skipRendering = true;
                 beginFrame();
@@ -561,6 +658,10 @@ public class Renderer {
             }
 
             imageIndex = pImageIndex.get(0);
+
+            // The acquire above signalled this slot's semaphore. It has not been
+            // waited on yet, so it may be handed to exactly one submit.
+            acquireSemaphorePending = true;
 
             // Wait until the previous frame that rendered this swapchain image has
             // finished, so its semaphores/fences are safe to reuse (per-image sync).
@@ -595,9 +696,11 @@ public class Renderer {
         // bound" state from the previous recording session is void.
         invalidateBindingState();
 
-        recordingCmds = true;
-        mainPass.begin(commandBuffer, stack);
-
+        // vkCmdResetQueryPool must be issued OUTSIDE a render pass instance
+        // (VUID-vkCmdResetQueryPool-renderpass). The pass starts at
+        // mainPass.begin() below, so the two resets have to happen here, before
+        // it - inside it they are an invalid usage even though every driver
+        // tested tolerates them.
         long __c1 = FrameProfiler.start();
         vkCmdResetQueryPool(commandBuffer, gpuQueryPools[currentFrame], 0, GPU_QUERY_COUNT);
         FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __c1);
@@ -608,6 +711,10 @@ public class Renderer {
             FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __cd);
             gpuDrawQueryCount[currentFrame] = 0;
         }
+
+        recordingCmds = true;
+        mainPass.begin(commandBuffer, stack);
+
         long __c2 = FrameProfiler.start();
         writeGpuTimestamp(commandBuffer, GPU_TS_MAIN);
         FrameProfiler.addCmd(FrameProfiler.CMD_OTHER, __c2);
@@ -650,55 +757,103 @@ public class Renderer {
     }
 
     private void submitFrame() {
-        if (swapChainUpdate)
+        // No pass was opened (minimised window, or a rebuild is pending), or the
+        // swapchain itself is gone: there is nothing to submit and nothing to
+        // present. Presenting on a VK_NULL_HANDLE swapchain is undefined
+        // behaviour, and a swapchain whose surface extent is 0x0 must not be
+        // presented to at all.
+        if (swapChainUpdate || skipRendering || swapChain.getId() == VK_NULL_HANDLE)
             return;
 
-        try (MemoryStack stack = stackPush()) {
-            int vkResult;
+        // Serialise with ImageUploadHelper's Queue.submitCommands() (it locks
+        // the same Queue instance). The Forge splash presents from its own
+        // thread while the loading thread still uploads textures; two
+        // concurrent vkQueueSubmit on one queue is a Vulkan usage error and
+        // loses the device.
+        synchronized (DeviceManager.getGraphicsQueue()) {
+            try (MemoryStack stack = stackPush()) {
+                int vkResult;
 
-            VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack);
-            submitInfo.sType(VK_STRUCTURE_TYPE_SUBMIT_INFO);
+                // The acquire signal is one-shot. If a swapchain-image readback
+                // already waited on it, that submit is ahead of this one on the
+                // same queue, so the "presentation engine finished reading"
+                // dependency is already in place transitively and waiting again
+                // would hang on a semaphore with no pending signal.
+                final long acquireSemaphore = acquireSemaphorePending
+                        ? imageAvailableSemaphores.get(currentFrame) : VK_NULL_HANDLE;
+                acquireSemaphorePending = false;
 
-            submitInfo.waitSemaphoreCount(1);
-            submitInfo.pWaitSemaphores(stack.longs(imageAvailableSemaphores.get(currentFrame)));
-            submitInfo.pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT));
-            submitInfo.pSignalSemaphores(stack.longs(renderFinishedSemaphores.get(imageIndex)));
-            submitInfo.pCommandBuffers(stack.pointers(currentCmdBuffer));
+                VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack);
+                submitInfo.sType(VK_STRUCTURE_TYPE_SUBMIT_INFO);
 
-            vkResetFences(device, inFlightFences.get(currentFrame));
+                // waitSemaphoreCount must stay 0 when there is nothing to wait
+                // on: handing the layer a VK_NULL_HANDLE handle with a count of
+                // 1 is itself an invalid usage (and crashes the validation
+                // layer's native code).
+                if (acquireSemaphore != VK_NULL_HANDLE) {
+                    submitInfo.waitSemaphoreCount(1);
+                    submitInfo.pWaitSemaphores(stack.longs(acquireSemaphore));
+                    submitInfo.pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT));
+                }
+                submitInfo.pSignalSemaphores(stack.longs(renderFinishedSemaphores.get(imageIndex)));
+                submitInfo.pCommandBuffers(stack.pointers(currentCmdBuffer));
 
-            if ((vkResult = vkQueueSubmit(DeviceManager.getGraphicsQueue().queue(), submitInfo, inFlightFences.get(currentFrame))) != VK_SUCCESS) {
                 vkResetFences(device, inFlightFences.get(currentFrame));
-                throw new RuntimeException("Failed to submit draw command buffer: %s".formatted(VkResult.decode(vkResult)));
+
+                if ((vkResult = vkQueueSubmit(DeviceManager.getGraphicsQueue().queue(), submitInfo, inFlightFences.get(currentFrame))) != VK_SUCCESS) {
+                    vkResetFences(device, inFlightFences.get(currentFrame));
+                    throw new RuntimeException("Failed to submit draw command buffer: %s".formatted(VkResult.decode(vkResult)));
+                }
+
+                // Swapchain readback window. The frame's command buffer has just
+                // been submitted, so the driver's idea of the swapchain image's
+                // layout has caught up with the CPU-side cache (both say
+                // PRESENT_SRC_KHR, set by mainPass.end()), but the image has not
+                // been presented yet, so it is still owned by this frame. That is
+                // the only point at which reading it back is legal on both
+                // counts: with the pass open the two sides disagree, and after
+                // the present the image has been released (VUID: "image has not
+                // been acquired"). Anything recorded here is submitted on this
+                // same queue, so it stays ordered behind the frame it dumps.
+                final java.lang.Runnable hook = preSubmitHook;
+                if (hook != null) {
+                    try {
+                        hook.run();
+                    } catch (Throwable t) {
+                        // A failed diagnostic must never take the frame down.
+                        com.yuhan123.vulkanmod.VulkanMod.LOGGER.error("[Renderer] preSubmitHook failed", t);
+                    }
+                }
+
+                VkPresentInfoKHR presentInfo = VkPresentInfoKHR.calloc(stack);
+                presentInfo.sType(VK_STRUCTURE_TYPE_PRESENT_INFO_KHR);
+
+                presentInfo.pWaitSemaphores(stack.longs(renderFinishedSemaphores.get(imageIndex)));
+
+                presentInfo.swapchainCount(1);
+                presentInfo.pSwapchains(stack.longs(swapChain.getId()));
+
+                presentInfo.pImageIndices(stack.ints(imageIndex));
+
+                // Timed separately from vkQueueSubmit: this call can block on the
+                // presentation engine (vsync, driver frame pacing, a full queue of
+                // images), and that is not CPU work. Without splitting it out it lands
+                // in the report's "cpu" figure, which is defined as frame - fence, and
+                // makes a present-bound frame look CPU-bound.
+                FrameProfiler.beginPresent();
+                vkResult = vkQueuePresentKHR(DeviceManager.getPresentQueue().queue(), presentInfo);
+                FrameProfiler.endPresent();
+
+                if (vkResult == VK_ERROR_OUT_OF_DATE_KHR || vkResult == VK_SUBOPTIMAL_KHR
+                        || vkResult == VK_ERROR_SURFACE_LOST_KHR || swapChainUpdate) {
+                    swapChainUpdate = true;
+                    return;
+                } else if (vkResult != VK_SUCCESS) {
+                    throw new RuntimeException("Failed to present rendered frame: %s".formatted(VkResult.decode(vkResult)));
+                }
+
+                currentFrame = (currentFrame + 1) % framesNum;
             }
-
-            VkPresentInfoKHR presentInfo = VkPresentInfoKHR.calloc(stack);
-            presentInfo.sType(VK_STRUCTURE_TYPE_PRESENT_INFO_KHR);
-
-            presentInfo.pWaitSemaphores(stack.longs(renderFinishedSemaphores.get(imageIndex)));
-
-            presentInfo.swapchainCount(1);
-            presentInfo.pSwapchains(stack.longs(swapChain.getId()));
-
-            presentInfo.pImageIndices(stack.ints(imageIndex));
-
-            // Timed separately from vkQueueSubmit: this call can block on the
-            // presentation engine (vsync, driver frame pacing, a full queue of
-            // images), and that is not CPU work. Without splitting it out it lands
-            // in the report's "cpu" figure, which is defined as frame - fence, and
-            // makes a present-bound frame look CPU-bound.
-            FrameProfiler.beginPresent();
-            vkResult = vkQueuePresentKHR(DeviceManager.getPresentQueue().queue(), presentInfo);
-            FrameProfiler.endPresent();
-
-            if (vkResult == VK_ERROR_OUT_OF_DATE_KHR || vkResult == VK_SUBOPTIMAL_KHR || swapChainUpdate) {
-                swapChainUpdate = true;
-                return;
-            } else if (vkResult != VK_SUCCESS) {
-                throw new RuntimeException("Failed to present rendered frame: %s".formatted(VkResult.decode(vkResult)));
-            }
-
-            currentFrame = (currentFrame + 1) % framesNum;
         }
     }
 
@@ -841,6 +996,9 @@ public class Renderer {
 
         commandBuffers.forEach(commandBuffer -> vkResetCommandBuffer(commandBuffer, 0));
         recordingCmds = false;
+        // The semaphores are about to be recreated; any acquire signal still
+        // outstanding belongs to the destroyed swapchain.
+        acquireSemaphorePending = false;
 
         swapChain.recreate();
 
@@ -1085,6 +1243,37 @@ public class Renderer {
         return boundRenderPass;
     }
 
+    /**
+     * True while a render pass instance is open on the frame's command buffer.
+     *
+     * <p>{@code vkCmdPipelineBarrier} is illegal inside a render pass instance
+     * whose pass has no self-dependency (VUID-vkCmdPipelineBarrier-None-07889),
+     * so anything that wants to transition an image layout has to check this
+     * first and defer to {@link ImageUploadHelper} instead. {@code DYNAMIC_RENDERING}
+     * is off in this build, so the pass is always a classic one and
+     * {@link #setBoundRenderPass} tracks it exactly.
+     */
+    public boolean isRenderPassActive() {
+        return boundRenderPass != null;
+    }
+
+    /**
+     * Optional hook run by {@link #submitFrame()} after the frame's command
+     * buffer has been queued but BEFORE it is presented.
+     *
+     * <p>That is the only window in which reading the swapchain image back is
+     * spec-legal on both counts: the submit has already happened, so the
+     * driver's layout for the image has caught up with the CPU-side cache (both
+     * say {@code PRESENT_SRC_KHR}, put there by {@code mainPass.end()}), and the
+     * present has not, so the image is still owned by this frame - acquired in
+     * {@link #beginFrame()}, released by the present below. Reading it with the
+     * render pass open makes the two sides disagree; reading it after the
+     * present transitions an image that has already been released
+     * ("image has not been acquired"). Anything the hook records goes to the
+     * same queue, so it stays ordered behind the frame it dumps.
+     */
+    public static volatile java.lang.Runnable preSubmitHook;
+
     public void setMainPass(MainPass mainPass) {
         this.mainPass = mainPass;
     }
@@ -1121,6 +1310,14 @@ public class Renderer {
         if (skipRendering)
             return;
 
+        // Records into the current command buffer, so a splash-thread call has
+        // to exclude the main thread's frame transitions (see
+        // Drawer.splashPresenting). Reentrant; a no-op during normal play.
+        final boolean splashLock = SplashPresenter.mainPresentEnabled;
+        if (splashLock) {
+            ImageUploadHelper.LOCK.lock();
+        }
+        try {
         try (MemoryStack stack = stackPush()) {
             //ClearValues have to be different for each attachment to clear,
             //it seems it uses the same buffer: color and depth values override themselves
@@ -1176,6 +1373,11 @@ public class Renderer {
             vkCmdClearAttachments(INSTANCE.currentCmdBuffer, pAttachments, pRect);
             FrameProfiler.addCmd(FrameProfiler.CMD_CLEAR_ATTACHMENTS, __c);
         }
+        } finally {
+            if (splashLock) {
+                ImageUploadHelper.LOCK.unlock();
+            }
+        }
     }
 
     public static void setInvertedViewport(int x, int y, int width, int height) {
@@ -1203,6 +1405,14 @@ public class Renderer {
         if (!INSTANCE.recordingCmds)
             return;
 
+        // Records into the current command buffer, so a splash-thread call has
+        // to exclude the main thread's frame transitions (see
+        // Drawer.splashPresenting). Reentrant; a no-op during normal play.
+        final boolean splashLock = SplashPresenter.mainPresentEnabled;
+        if (splashLock) {
+            ImageUploadHelper.LOCK.lock();
+        }
+        try {
         VkViewport.Buffer viewport = VkViewport.malloc(1, stack);
         viewport.x(x);
 
@@ -1234,12 +1444,25 @@ public class Renderer {
         long __c = FrameProfiler.start();
         vkCmdSetViewport(INSTANCE.currentCmdBuffer, 0, viewport);
         FrameProfiler.addCmd(FrameProfiler.CMD_SET_VIEWPORT, __c);
+        } finally {
+            if (splashLock) {
+                ImageUploadHelper.LOCK.unlock();
+            }
+        }
     }
 
     public static void setScissor(int x, int y, int width, int height) {
         if (INSTANCE.boundFramebuffer == null)
             return;
 
+        // Records into the current command buffer, so a splash-thread call has
+        // to exclude the main thread's frame transitions (see
+        // Drawer.splashPresenting). Reentrant; a no-op during normal play.
+        final boolean splashLock = SplashPresenter.mainPresentEnabled;
+        if (splashLock) {
+            ImageUploadHelper.LOCK.lock();
+        }
+        try {
         try (MemoryStack stack = stackPush()) {
             int framebufferHeight = INSTANCE.boundFramebuffer.getHeight();
 
@@ -1253,18 +1476,36 @@ public class Renderer {
         vkCmdSetScissor(INSTANCE.currentCmdBuffer, 0, scissor);
         FrameProfiler.addCmd(FrameProfiler.CMD_SET_SCISSOR, __c);
     }
+        } finally {
+            if (splashLock) {
+                ImageUploadHelper.LOCK.unlock();
+            }
+        }
     }
 
     public static void resetScissor() {
         if (INSTANCE.boundFramebuffer == null)
             return;
 
+        // Records into the current command buffer, so a splash-thread call has
+        // to exclude the main thread's frame transitions (see
+        // Drawer.splashPresenting). Reentrant; a no-op during normal play.
+        final boolean splashLock = SplashPresenter.mainPresentEnabled;
+        if (splashLock) {
+            ImageUploadHelper.LOCK.lock();
+        }
+        try {
         try (MemoryStack stack = stackPush()) {
         VkRect2D.Buffer scissor = INSTANCE.boundFramebuffer.scissor(stack);
         long __c = FrameProfiler.start();
         vkCmdSetScissor(INSTANCE.currentCmdBuffer, 0, scissor);
         FrameProfiler.addCmd(FrameProfiler.CMD_SET_SCISSOR, __c);
     }
+        } finally {
+            if (splashLock) {
+                ImageUploadHelper.LOCK.unlock();
+            }
+        }
     }
 
     public static void pushDebugSection(String s) {
@@ -1298,12 +1539,43 @@ public class Renderer {
         return INSTANCE.framesNum;
     }
 
+    /**
+     * Remembers the GLFW window so {@link #beginFrame()} can poll its iconify
+     * state.
+     *
+     * <p>This is deliberately a poll rather than a {@code glfwSetWindowIconifyCallback}
+     * install: GLFW allows exactly one callback per window per event, so
+     * installing one would silently un-install whatever lwjglx / another mod
+     * put there (breaking {@code Display.getWidth()}-style bookkeeping), and
+     * chaining would require keeping a native function pointer alive for the
+     * process lifetime. One {@code glfwGetWindowAttrib} per frame costs nothing
+     * and notices the state at the same latency a callback would, because the
+     * events are only ever dispatched by {@code glfwPollEvents()} anyway.
+     */
+    public static void installWindowCallbacks(long window) {
+        if (window != 0L) {
+            glfwWindow = window;
+            // Adopt the current state instead of treating "not yet seen" as
+            // restored: if the game starts minimised the first beginFrame must
+            // not try to build a swapchain for a 0x0 surface.
+            windowIconified = glfwGetWindowAttrib(glfwWindow, GLFW_ICONIFIED) != 0;
+            VulkanMod.LOGGER.info("[VKPROF] window state tracking armed (iconified={})", windowIconified);
+        }
+    }
+
+    /** True while the window is minimised, i.e. there is nothing to present to. */
+    public static boolean isWindowMinimized() {
+        return windowIconified;
+    }
+
     public static VkCommandBuffer getCommandBuffer() {
         return INSTANCE.currentCmdBuffer;
     }
 
     public static boolean isRecording() {
-        return INSTANCE.recordingCmds;
+        // Null-safe: a draw issued before initRenderer() has nothing to record
+        // into, and the callers use this as a "may I record?" gate.
+        return INSTANCE != null && INSTANCE.recordingCmds;
     }
 
     public static void scheduleSwapChainUpdate() {

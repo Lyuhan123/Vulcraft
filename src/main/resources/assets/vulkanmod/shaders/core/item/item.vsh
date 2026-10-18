@@ -31,6 +31,10 @@ layout(binding = 0) uniform LightUBO {
     vec3 Light0_Direction;
     vec3 Light1_Direction;
     mat4 ModelViewMat;
+    vec3 MaterialAmbient;
+    vec3 MaterialDiffuse;
+    float ColorMaterialMode;
+    float LightModelAmbient;
 };
 
 layout(location = 0) in vec3 Position;
@@ -54,7 +58,11 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec4 vertexColor;
 layout(location = 1) out vec2 texCoord0;
 layout(location = 2) out float vertexDistance;
-layout(location = 3) out float faceShade;
+// vec3, not a scalar: the GL material equation is
+//   ambient_mat * ambient_light + diffuse_mat * diffuse_light * (N.L0 + N.L1)
+// and ambient_mat / diffuse_mat are colours. It only degenerates to a scalar
+// when the two are equal, which is what vanilla's own setup produces.
+layout(location = 3) out vec3 faceShade;
 
 void main() {
     gl_Position = MVP * vec4(Position, 1.0);
@@ -64,5 +72,35 @@ void main() {
     vertexColor = Color;
 
     vec3 eyeNormal = normalize(transpose(inverse(mat3(ModelViewMat))) * Normal);
-    faceShade = minecraft_mix_light(Light0_Direction, Light1_Direction, eyeNormal, vec4(1.0)).r;
+
+    // GL_COLOR_MATERIAL resolution. When it is on with a mode that covers a
+    // parameter, that parameter tracks the current vertex colour - which the
+    // fragment stage has ALREADY multiplied into `color`. So the tracked
+    // material contributes WHITE here; handing the colour over as well would
+    // apply it twice. This is exactly why the previous hardcoded vec4(1.0)
+    // happened to be right for vanilla, whose only lighting setup pairs
+    // enableColorMaterial() with colorMaterial(GL_FRONT_AND_BACK,
+    // GL_AMBIENT_AND_DIFFUSE).
+    //
+    // The reverse case is the point of the whole material series: a mod that
+    // calls glMaterial(GL_FRONT, GL_DIFFUSE, ...) with colour material OFF now
+    // gets its colour, instead of it being silently dropped.
+    bool trackAmbient = mod(ColorMaterialMode, 2.0) >= 1.0;
+    bool trackDiffuse = ColorMaterialMode >= 2.0;
+    vec3 matAmbient = trackAmbient ? vec3(1.0) : MaterialAmbient;
+    vec3 matDiffuse = trackDiffuse ? vec3(1.0) : MaterialDiffuse;
+
+    vec2 nDotL = minecraft_compute_light(Light0_Direction, Light1_Direction, eyeNormal);
+    vec2 lit = max(vec2(0.0), nDotL);
+    // MINECRAFT_LIGHT_POWER (0.6) is the per-light diffuse of vanilla's two
+    // setups; LightModelAmbient (0.4) is the ambient term, which used to be the
+    // MINECRAFT_AMBIENT_LIGHT constant hardcoded in light.glsl.
+    //
+    // The min(1.0) clamp is load-bearing: with both lights fully on a face the
+    // sum reaches 0.4 + 1.2 = 1.6, and the port has always clamped it to 1.0
+    // (minecraft_mix_light_separate). Dropping it over-brightens every lit item,
+    // so it stays - applied per channel, which is exact for the vanilla case
+    // where the two material colours are equal.
+    faceShade = min(vec3(1.0), matAmbient * LightModelAmbient
+                  + matDiffuse * MINECRAFT_LIGHT_POWER * (lit.x + lit.y));
 }

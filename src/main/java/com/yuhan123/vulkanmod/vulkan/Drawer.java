@@ -7,6 +7,7 @@ import com.yuhan123.vulkanmod.vulkan.memory.buffer.IndexBuffer;
 import com.yuhan123.vulkanmod.vulkan.memory.buffer.UniformBuffer;
 import com.yuhan123.vulkanmod.vulkan.memory.buffer.VertexBuffer;
 import com.yuhan123.vulkanmod.vulkan.memory.buffer.index.AutoIndexBuffer;
+import com.yuhan123.vulkanmod.render.texture.ImageUploadHelper;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import com.yuhan123.vulkanmod.vulkan.util.VUtil;
@@ -73,6 +74,28 @@ public class Drawer {
         this.currentFrame = currentFrame;
     }
 
+    /**
+     * True while the loading splash is being presented, i.e. while a non-main
+     * thread may be recording frames (see {@link SplashPresenter}).
+     *
+     * <p>Recording from that thread has to be atomic with respect to the main
+     * thread's frame transitions: {@code Renderer.beginFrame()} runs
+     * {@code vkResetCommandBuffer} on - and rewinds the per-frame vertex, index
+     * and uniform buffers used by - the command buffer being recorded into, and
+     * {@code endFrame()} submits it. Interleaving the two corrupts command-buffer
+     * memory and takes the driver down (observed: EXCEPTION_ACCESS_VIOLATION in
+     * igvk64.dll inside vkCmdDrawIndexed).
+     *
+     * <p>{@code SplashPresenter.begin/end} bracket the vanilla Forge splash loop,
+     * but loading-screen mods (CustomLoadingScreen) rewrite that loop through a
+     * coremod and the injections do not survive the rewrite, so every recording
+     * entry point takes this lock as well. Reentrant, and a no-op during normal
+     * play ({@code mainPresentEnabled == false}).
+     */
+    public static boolean splashPresenting() {
+        return SplashPresenter.mainPresentEnabled;
+    }
+
     public void createResources(int framesNum) {
         this.framesNum = framesNum;
 
@@ -118,36 +141,102 @@ public class Drawer {
      * frame, which was the main CPU bottleneck.
      */
     public void draw(ByteBuffer vertexData, ByteBuffer indexData, int mode, VertexFormat vertexFormat, int vertexCount) {
+        if (!splashPresenting()) {
+            drawRecord(vertexData, indexData, mode, vertexFormat, vertexCount);
+            return;
+        }
+        ImageUploadHelper.LOCK.lock();
+        try {
+            drawRecord(vertexData, indexData, mode, vertexFormat, vertexCount);
+        } finally {
+            ImageUploadHelper.LOCK.unlock();
+        }
+    }
+
+    /**
+     * True when a render pass is open and the frame's command buffer may be
+     * recorded into.
+     *
+     * <p>This is false for the whole time the window is minimised:
+     * {@code Renderer.beginFrame()} returns before opening the pass, but MC's
+     * render loop keeps calling into the renderer because it has no idea the
+     * swapchain is gone. Recording {@code vkCmdDraw*} into a command buffer
+     * that was never begun is a usage violation - the Intel display driver
+     * answers it with {@code EXCEPTION_ACCESS_VIOLATION} inside
+     * {@code vkCmdDrawIndexed}, which is the "minimising sometimes crashes"
+     * report. Every recording entry point checks this first.
+     */
+    private static boolean canRecord() {
+        return Renderer.isRecording();
+    }
+
+    private void drawRecord(ByteBuffer vertexData, ByteBuffer indexData, int mode, VertexFormat vertexFormat, int vertexCount) {
+        if (!canRecord()) {
+            return;
+        }
         FrameProfiler.onCopiedDraw(vertexFormat);
         VertexBuffer vertexBuffer = this.vertexBuffers[this.currentFrame];
         int size = vertexFormat.getSize() * vertexCount;
         vertexBuffer.copyBuffer(vertexData, size);
 
-        if (indexData != null) {
-            IndexBuffer indexBuffer = this.indexBuffers[this.currentFrame];
-            indexBuffer.copyBuffer(indexData, indexData.remaining());
-
-            int indexCount = vertexCount * 3 / 2;
-
-            drawIndexed(vertexBuffer, indexBuffer, indexCount);
+        // A line draw must resolve to a LINE_LIST pipeline, not the default
+        // TRIANGLE_LIST one. VRenderSystem.topology is an input to the
+        // state-keyed pipeline lookup (PipelineState.getCurrentPipelineState,
+        // read by Renderer.flushPipelineBind at the vkCmdDrawIndexed below), and
+        // nothing else ever wrote LINE_LIST into it - so every line draw went
+        // out through a triangle pipeline. With the corrected line index buffer
+        // (AutoIndexBuffer.genLinesIndices) that is what turned the F3 axes into
+        // filled triangles. Restored in the finally so the next draw is
+        // unaffected; save/restore is cheap and this path is not hot.
+        final boolean lineMode = (mode == LINES || mode == DEBUG_LINE_STRIP);
+        final int prevTopology = lineMode ? VRenderSystem.topology : 0;
+        if (lineMode) {
+            VRenderSystem.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
         }
-        else {
-            AutoIndexBuffer autoIndexBuffer = getAutoIndexBuffer(mode, vertexCount);
+        try {
+            if (indexData != null) {
+                IndexBuffer indexBuffer = this.indexBuffers[this.currentFrame];
+                indexBuffer.copyBuffer(indexData, indexData.remaining());
 
-            if (autoIndexBuffer != null) {
-                int indexCount = autoIndexBuffer.getIndexCount(vertexCount);
-                // checkCapacity works in VERTEX counts, not index counts.
-                autoIndexBuffer.checkCapacity(vertexCount);
+                int indexCount = vertexCount * 3 / 2;
 
-                drawIndexed(vertexBuffer, autoIndexBuffer.getIndexBuffer(), indexCount);
+                drawIndexed(vertexBuffer, indexBuffer, indexCount);
             }
             else {
-                draw(vertexBuffer, vertexCount);
+                AutoIndexBuffer autoIndexBuffer = getAutoIndexBuffer(mode, vertexCount);
+
+                if (autoIndexBuffer != null) {
+                    int indexCount = autoIndexBuffer.getIndexCount(vertexCount);
+                    // checkCapacity works in VERTEX counts, not index counts.
+                    autoIndexBuffer.checkCapacity(vertexCount);
+
+                    drawIndexed(vertexBuffer, autoIndexBuffer.getIndexBuffer(), indexCount);
+                }
+                else {
+                    draw(vertexBuffer, vertexCount);
+                }
+            }
+        } finally {
+            if (lineMode) {
+                VRenderSystem.topology = prevTopology;
             }
         }
     }
 
     public void drawIndexed(Buffer vertexBuffer, IndexBuffer indexBuffer, int indexCount) {
+        if (!splashPresenting()) {
+            drawIndexedRecord(vertexBuffer, indexBuffer, indexCount);
+            return;
+        }
+        ImageUploadHelper.LOCK.lock();
+        try {
+            drawIndexedRecord(vertexBuffer, indexBuffer, indexCount);
+        } finally {
+            ImageUploadHelper.LOCK.unlock();
+        }
+    }
+
+    private void drawIndexedRecord(Buffer vertexBuffer, IndexBuffer indexBuffer, int indexCount) {
        drawIndexed(vertexBuffer, indexBuffer, indexCount, indexBuffer.indexType.value);
     }
 
@@ -187,6 +276,22 @@ public class Drawer {
     }
 
     public void draw(VertexBuffer vertexBuffer, long vertexOffset, int vertexCount) {
+        if (!splashPresenting()) {
+            drawRecord(vertexBuffer, vertexOffset, vertexCount);
+            return;
+        }
+        ImageUploadHelper.LOCK.lock();
+        try {
+            drawRecord(vertexBuffer, vertexOffset, vertexCount);
+        } finally {
+            ImageUploadHelper.LOCK.unlock();
+        }
+    }
+
+    private void drawRecord(VertexBuffer vertexBuffer, long vertexOffset, int vertexCount) {
+        if (!canRecord()) {
+            return;
+        }
         long __t = FrameProfiler.start();
         VkCommandBuffer commandBuffer = Renderer.getCommandBuffer();
 
@@ -235,11 +340,36 @@ public class Drawer {
      * once) at the given byte offset. No vertex data is copied this frame.
      */
     public void drawPersistent(VertexBuffer vertexBuffer, int byteOffset, int mode, VertexFormat vertexFormat, int vertexCount) {
+        if (!splashPresenting()) {
+            drawPersistentRecord(vertexBuffer, byteOffset, mode, vertexFormat, vertexCount);
+            return;
+        }
+        ImageUploadHelper.LOCK.lock();
+        try {
+            drawPersistentRecord(vertexBuffer, byteOffset, mode, vertexFormat, vertexCount);
+        } finally {
+            ImageUploadHelper.LOCK.unlock();
+        }
+    }
+
+    private void drawPersistentRecord(VertexBuffer vertexBuffer, int byteOffset, int mode, VertexFormat vertexFormat, int vertexCount) {
+        if (!canRecord()) {
+            return;
+        }
         FrameProfiler.onPersistentDraw();
         FrameProfiler.logDrawState("block");
         AutoIndexBuffer autoIndexBuffer = getAutoIndexBuffer(mode, vertexCount);
 
-        if (autoIndexBuffer != null) {
+        // Same LINE_LIST topology requirement as drawRecord: display-list replay
+        // and chunk VBOs reach the GPU through here, and a captured line draw
+        // must not resolve to the default triangle pipeline.
+        final boolean lineMode = (mode == LINES || mode == DEBUG_LINE_STRIP);
+        final int prevTopology = lineMode ? VRenderSystem.topology : 0;
+        if (lineMode) {
+            VRenderSystem.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+        }
+        try {
+            if (autoIndexBuffer != null) {
             int indexCount = autoIndexBuffer.getIndexCount(vertexCount);
             // checkCapacity works in VERTEX counts, not index counts.
             autoIndexBuffer.checkCapacity(vertexCount);
@@ -266,6 +396,11 @@ public class Drawer {
         }
         else {
             draw(vertexBuffer, byteOffset, vertexCount);
+        }
+        } finally {
+            if (lineMode) {
+                VRenderSystem.topology = prevTopology;
+            }
         }
     }
 

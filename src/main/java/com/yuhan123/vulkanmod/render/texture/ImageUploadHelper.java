@@ -8,11 +8,27 @@ import com.yuhan123.vulkanmod.vulkan.texture.VulkanImage;
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import org.lwjgl.system.MemoryStack;
 
+import java.util.concurrent.locks.ReentrantLock;
+
 import static org.lwjgl.system.MemoryStack.stackPush;
 
 public class ImageUploadHelper {
 
     public static final ImageUploadHelper INSTANCE = new ImageUploadHelper();
+
+    /**
+     * Guards the upload batch: opening it, appending copies to it (callers hold
+     * this for the whole recording operation, see {@code VulkanImage.uploadSubImage})
+     * and submitting it.
+     *
+     * <p>Normally all of this happens on the loading/render thread, but the
+     * Forge loading splash runs its own render loop on a second thread and
+     * calls {@code Renderer.endFrame()} -&gt; {@code submitCommands()} while the
+     * main thread is still uploading textures. Submitting a command buffer that
+     * another thread is recording into is invalid Vulkan usage and loses the
+     * device, so both sides take this lock.
+     */
+    public static final ReentrantLock LOCK = new ReentrantLock();
 
     final Queue queue;
     private CommandPool.CommandBuffer currentCmdBuffer;
@@ -34,16 +50,30 @@ public class ImageUploadHelper {
     }
 
     public void submitCommands() {
-        if (this.currentCmdBuffer == null) {
-            return;
+        LOCK.lock();
+        try {
+            // A deferred read-only transition must not be dropped just because
+            // nothing was uploaded in the meantime: the draw path defers to
+            // this batch (VulkanImage.readOnlyLayout()) precisely so it does not
+            // have to barrier inside an open render pass, and if the batch were
+            // skipped the image would be sampled in the wrong layout. Open one
+            // for the barriers alone when that is all there is.
+            if (this.currentCmdBuffer == null) {
+                if (this.pendingReadOnly.isEmpty()) {
+                    return;
+                }
+                this.currentCmdBuffer = this.queue.beginCommands();
+            }
+
+            this.flushPendingTransitions();
+
+            queue.submitCommands(this.currentCmdBuffer);
+            Synchronization.INSTANCE.addCommandBuffer(this.currentCmdBuffer);
+
+            this.currentCmdBuffer = null;
+        } finally {
+            LOCK.unlock();
         }
-
-        this.flushPendingTransitions();
-
-        long fence = queue.submitCommands(this.currentCmdBuffer);
-        Synchronization.INSTANCE.addCommandBuffer(this.currentCmdBuffer);
-
-        this.currentCmdBuffer = null;
     }
 
     private void flushPendingTransitions() {
@@ -62,7 +92,12 @@ public class ImageUploadHelper {
 
     /** Queue an image for a read-only transition at the end of this batch. */
     public void addPendingReadOnly(VulkanImage image) {
-        this.pendingReadOnly.add(image);
+        LOCK.lock();
+        try {
+            this.pendingReadOnly.add(image);
+        } finally {
+            LOCK.unlock();
+        }
     }
 
     /**
@@ -70,7 +105,12 @@ public class ImageUploadHelper {
      * path must not try to transition it (which would emit an in-pass barrier).
      */
     public boolean isPendingReadOnly(VulkanImage image) {
-        return this.pendingReadOnly.contains(image);
+        LOCK.lock();
+        try {
+            return this.pendingReadOnly.contains(image);
+        } finally {
+            LOCK.unlock();
+        }
     }
 
     /** Submit any pending batched uploads and wait for them to complete. */
@@ -79,16 +119,33 @@ public class ImageUploadHelper {
         Synchronization.INSTANCE.waitFences();
     }
 
+    /**
+     * Returns the batch's command buffer, creating it on first use.
+     * <p>
+     * Callers that only record into it must hold {@link #LOCK} for the whole
+     * recording operation (see {@code VulkanImage.uploadSubImage}); this method
+     * is safe to call on its own because it neither records nor submits.
+     */
     public CommandPool.CommandBuffer getOrStartCommandBuffer() {
-        if (this.currentCmdBuffer == null) {
-            this.currentCmdBuffer = this.queue.beginCommands();
-        }
+        LOCK.lock();
+        try {
+            if (this.currentCmdBuffer == null) {
+                this.currentCmdBuffer = this.queue.beginCommands();
+            }
 
-        return this.currentCmdBuffer;
+            return this.currentCmdBuffer;
+        } finally {
+            LOCK.unlock();
+        }
     }
 
     public CommandPool.CommandBuffer getCommandBuffer() {
-        return this.currentCmdBuffer;
+        LOCK.lock();
+        try {
+            return this.currentCmdBuffer;
+        } finally {
+            LOCK.unlock();
+        }
     }
 
     /**
@@ -97,6 +154,11 @@ public class ImageUploadHelper {
      * staging buffer must not be rewound while this is true.
      */
     public boolean hasPendingCommands() {
-        return this.currentCmdBuffer != null;
+        LOCK.lock();
+        try {
+            return this.currentCmdBuffer != null;
+        } finally {
+            LOCK.unlock();
+        }
     }
 }

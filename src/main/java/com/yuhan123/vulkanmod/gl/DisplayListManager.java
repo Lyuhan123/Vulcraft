@@ -3,7 +3,9 @@ package com.yuhan123.vulkanmod.gl;
 import com.yuhan123.vulkanmod.config.VulkanModConfig;
 import com.yuhan123.vulkanmod.render.PipelineManager;
 import com.yuhan123.vulkanmod.render.shader.ShaderInstance;
+import com.yuhan123.vulkanmod.render.texture.ImageUploadHelper;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
+import com.yuhan123.vulkanmod.vulkan.Drawer;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
 import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import com.yuhan123.vulkanmod.vulkan.memory.MemoryTypes;
@@ -318,6 +320,14 @@ public class DisplayListManager {
             // Paired with the row above: position correctness says nothing about
         }
 
+        // Replaying a list from the splash thread has to exclude the main
+        // thread's frame transitions: apply() uploads into the per-frame uniform
+        // buffer and the draws bind it, both of which Renderer.beginFrame()
+        // rewinds (see Drawer.splashPresenting). Reentrant; a no-op in play.
+        final boolean splashLock = Drawer.splashPresenting();
+        if (splashLock) {
+            ImageUploadHelper.LOCK.lock();
+        }
         try {
             long __t = FrameProfiler.start();
             shader.apply();
@@ -332,6 +342,9 @@ public class DisplayListManager {
                 Renderer.getDrawer().draw(draw.fallback, draw.mode, draw.vertexFormat, draw.vertexCount);
             }
         } finally {
+            if (splashLock) {
+                ImageUploadHelper.LOCK.unlock();
+            }
             FrameProfiler.setEntityReplay(false);
             VRenderSystem.markMvpDirty();
         }

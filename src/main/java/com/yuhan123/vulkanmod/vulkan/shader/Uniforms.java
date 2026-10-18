@@ -48,6 +48,16 @@ public class Uniforms {
         // above - the shader-local VkUniform has no writer and would stay at the
         // JSON default. See VRenderSystem.fogEnabled.
         vec1f_uniformMap.put("FogEnabled", () -> VRenderSystem.fogEnabled ? 1.0f : 0.0f);
+        // Fixed-function texGen switch for the position_color_texgen pipeline
+        // (the end-portal starfield). See VRenderSystem's texGen block.
+        vec1f_uniformMap.put("TexGenEnabled", () -> VRenderSystem.texGenEnabled ? 1.0f : 0.0f);
+        // Fixed-function material (glMaterial / glColorMaterial). Carried as
+        // small codes rather than separate booleans so the item shader can
+        // resolve the tracking against the vertex colour in one place:
+        // VRenderSystem.colorMaterialTracking() (0 = off, bit0 = ambient tracks,
+        // bit1 = diffuse tracks) and VRenderSystem.lightModelAmbient[0].
+        vec1f_uniformMap.put("ColorMaterialMode", () -> (float) VRenderSystem.colorMaterialTracking());
+        vec1f_uniformMap.put("LightModelAmbient", () -> VRenderSystem.lightModelAmbient[0]);
 
         //Vec2
         vec2f_uniformMap.put("ScreenSize", VRenderSystem::getScreenSize);
@@ -56,6 +66,12 @@ public class Uniforms {
         vec3f_uniformMap.put("Light0_Direction", () -> VRenderSystem.lightDirection0);
         vec3f_uniformMap.put("Light1_Direction", () -> VRenderSystem.lightDirection1);
         vec3f_uniformMap.put("ModelOffset", () -> VRenderSystem.modelOffset);
+        // Fixed-function material (glMaterial / glColorMaterial), FRONT face.
+        // The item shader resolves GL_COLOR_MATERIAL against the vertex colour
+        // itself, so these carry the glMaterial-set values only - see the
+        // colour-material note in item.vsh.
+        vec3f_uniformMap.put("MaterialAmbient", () -> VRenderSystem.materialAmbientView);
+        vec3f_uniformMap.put("MaterialDiffuse", () -> VRenderSystem.materialDiffuseView);
         // Camera position for the terrain fog distance. The batched and vanilla
         // terrain paths both feed WORLD-space vertices to block.vsh; fog is a
         // function of the vertex-to-camera distance, so the shader subtracts this.
@@ -84,6 +100,14 @@ public class Uniforms {
         // global supplier the UBO field would bind to the shader-local VkUniform,
         // which nothing writes, and the flash would stay invisible.
         vec4f_uniformMap.put("EntityFlash", () -> VRenderSystem.flashColor);
+        // texGen eye planes for the end-portal pipeline (GL_EYE_LINEAR:
+        // coord = plane . eyePosition). Vanilla's only texGen user sets the
+        // identity planes, but the state is published per-coordinate so the
+        // shader stays a faithful fixed-function reproduction.
+        vec4f_uniformMap.put("TexGenPlaneS", () -> VRenderSystem.texGenPlanes[0]);
+        vec4f_uniformMap.put("TexGenPlaneT", () -> VRenderSystem.texGenPlanes[1]);
+        vec4f_uniformMap.put("TexGenPlaneR", () -> VRenderSystem.texGenPlanes[2]);
+        vec4f_uniformMap.put("TexGenPlaneQ", () -> VRenderSystem.texGenPlanes[3]);
 
     }
 

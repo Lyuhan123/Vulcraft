@@ -92,8 +92,17 @@ public class SwapChain extends Framebuffer {
                     this.swapChainId = VK_NULL_HANDLE;
                 }
 
+                // Drop the image list too. It described the swapchain that was
+                // just destroyed, so every VkImageView in it is a dangling
+                // handle; leaving it in place lets anything that walks
+                // getImages()/getColorAttachment() bind freed memory. The
+                // renderer does not draw while minimised (skipRendering), so
+                // an empty list is the honest description of "no swapchain".
+                this.swapChainImages = new ArrayList<>();
+
                 this.width = 0;
                 this.height = 0;
+                VulkanMod.LOGGER.info("[VKPROF] swapchain released (surface extent 0x0 - window minimised)");
                 return;
             }
 
@@ -266,7 +275,17 @@ public class SwapChain extends Framebuffer {
         return this.extent2D;
     }
 
+    /**
+     * The swapchain image for the frame being rendered, or {@code null} when
+     * there is no swapchain (window minimised: the surface extent is 0x0 and
+     * the images were destroyed). Callers that read back the backbuffer - the
+     * screenshot path - already treat null as "fill with black", so this keeps
+     * a minimised screenshot from indexing an empty list.
+     */
     public VulkanImage getColorAttachment() {
+        if (this.swapChainImages.isEmpty()) {
+            return null;
+        }
         return this.swapChainImages.get(Renderer.getCurrentImage());
     }
 
@@ -278,12 +297,16 @@ public class SwapChain extends Framebuffer {
     // matches the frame currently being rendered.
     @Override
     public VulkanImage getDepthAttachment() {
+        if (this.depthAttachments == null || this.depthAttachments.isEmpty()) {
+            return null;
+        }
         return this.depthAttachments.get(Renderer.getCurrentImage());
     }
 
     @Override
     public long getDepthImageView() {
-        return this.depthAttachments.get(Renderer.getCurrentImage()).getImageView();
+        VulkanImage depth = getDepthAttachment();
+        return depth == null ? VK_NULL_HANDLE : depth.getImageView();
     }
 
     private VkSurfaceFormatKHR getFormat(VkSurfaceFormatKHR.Buffer availableFormats) {

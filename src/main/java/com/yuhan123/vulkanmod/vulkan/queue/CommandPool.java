@@ -143,6 +143,16 @@ public class CommandPool {
         }
 
         public long submitCommands(MemoryStack stack, VkQueue queue, boolean useSemaphore) {
+            return submitCommands(stack, queue, useSemaphore, VK_NULL_HANDLE);
+        }
+
+        /**
+         * @param waitSemaphore optional semaphore the submit must wait on before
+         *                      it may touch any resource, or {@code VK_NULL_HANDLE}
+         *                      for none. Used for submits that write to the
+         *                      swapchain image the current frame owns.
+         */
+        public long submitCommands(MemoryStack stack, VkQueue queue, boolean useSemaphore, long waitSemaphore) {
             long fence = this.fence;
 
             vkEndCommandBuffer(this.handle);
@@ -155,6 +165,12 @@ public class CommandPool {
 
             if (useSemaphore) {
                 submitInfo.pSignalSemaphores(stack.longs(this.semaphore));
+            }
+
+            if (waitSemaphore != VK_NULL_HANDLE) {
+                submitInfo.waitSemaphoreCount(1);
+                submitInfo.pWaitSemaphores(stack.longs(waitSemaphore));
+                submitInfo.pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
             }
 
             vkQueueSubmit(queue, submitInfo, fence);

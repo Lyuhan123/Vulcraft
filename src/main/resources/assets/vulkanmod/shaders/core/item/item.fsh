@@ -16,7 +16,7 @@ layout(binding = 1) uniform UBO{
 layout(location = 0) in vec4 vertexColor;
 layout(location = 1) in vec2 texCoord0;
 layout(location = 2) in float vertexDistance;
-layout(location = 3) in float faceShade;
+layout(location = 3) in vec3 faceShade;
 
 layout(location = 0) out vec4 fragColor;
 
@@ -33,7 +33,11 @@ void main() {
     // Item lighting is a switch separate from the lightmap: vanilla turns it on
     // per item model, and a flat icon has to stay bright even while the lightmap
     // coordinate is dark. See VRenderSystem.lightingEnabled.
-    color.rgb *= mix(1.0, faceShade, step(0.5, LightingEnabled));
+    //
+    // faceShade is a vec3 (the full GL material equation, see item.vsh) but
+    // degenerates to a scalar when the material colours match - which is the
+    // case for every vanilla path, so this is the same multiply it always was.
+    color.rgb *= mix(vec3(1.0), faceShade, step(0.5, LightingEnabled));
     if (color.a < 0.1) {
         discard;
     }

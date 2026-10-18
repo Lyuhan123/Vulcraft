@@ -46,7 +46,12 @@ public class AutoIndexBuffer {
             }
             case DrawType.TRIANGLE_FAN -> buffer = genTriangleFanIndices(vertexCount);
             case DrawType.TRIANGLE_STRIP -> buffer = genTriangleStripIndices(vertexCount);
-            case DrawType.LINES -> buffer = genLinesIndices(vertexCount);
+            case DrawType.LINES -> {
+                if (indexType == IndexBuffer.IndexType.UINT16)
+                    buffer = genLinesIndices(vertexCount);
+                else
+                    buffer = genIntLinesIndices(vertexCount);
+            }
             case DrawType.DEBUG_LINE_STRIP -> buffer = genDebugLineStripIndices(vertexCount);
             default -> throw new IllegalArgumentException("Unsupported drawType: %s".formatted(this.drawType));
         }
@@ -81,8 +86,18 @@ public class AutoIndexBuffer {
 
     public static int getIndexCount(int drawType, int vertexCount) {
         switch (drawType) {
-            case DrawType.QUADS, DrawType.LINES -> {
+            case DrawType.QUADS -> {
                 return vertexCount * 3 / 2;
+            }
+            case DrawType.LINES -> {
+                // GL_LINES carries 2 vertices per segment, and a LINE_LIST draw
+                // consumes exactly those pairs as indices (2 indices per segment).
+                // This used to share the QUADS arm (vertexCount * 3 / 2), which
+                // told vkCmdDrawIndexed to read 1.5 indices per vertex - the
+                // count that makes 6 line vertices (3 segments) draw as 4
+                // triangles. Odd vertex counts are truncated to whole pairs,
+                // mirroring GL's behaviour of dropping the dangling vertex.
+                return vertexCount / 2 * 2;
             }
             case DrawType.TRIANGLE_FAN, DrawType.TRIANGLE_STRIP -> {
                 return (vertexCount - 2) * 3;
@@ -96,7 +111,10 @@ public class AutoIndexBuffer {
 
     public static int maxVertexCount(int drawType, int maxIndexCount) {
         return switch (drawType) {
-            case DrawType.QUADS, DrawType.LINES -> maxIndexCount * 3 / 2;
+            // Inverse of getIndexCount above: QUADS consumes 1.5 indices per
+            // vertex, LINES exactly 1 (one index per vertex, in pairs).
+            case DrawType.QUADS -> maxIndexCount * 3 / 2;
+            case DrawType.LINES -> maxIndexCount / 2 * 2;
 
             default -> maxIndexCount;
         };
@@ -146,23 +164,39 @@ public class AutoIndexBuffer {
         return buffer;
     }
 
+    /**
+     * Index pairs for a GL_LINES draw: every 2 vertices form one line segment,
+     * and a VK_PRIMITIVE_TOPOLOGY_LINE_LIST draw consumes exactly those pairs.
+     * <p>
+     * This generator used to be a copy of {@link #genQuadIndices} (i += 4, six
+     * indices per four vertices, two triangles). With GL_LINES input that
+     * pattern is nonsense: 6 axis vertices became 4 triangles, so the F3
+     * direction axes (OpenGlHelper.renderDirections) rendered as wide filled
+     * wedges plus garbage triangles reading past the copied vertex count -
+     * "the red/green/blue rays are too wide".
+     */
     public static ByteBuffer genLinesIndices(int vertexCount) {
-        int indexCount = vertexCount * 3 / 2;
-        indexCount = roundUpToDivisible(indexCount, 6);
+        int indexCount = vertexCount / 2 * 2;
 
         ByteBuffer buffer = MemoryUtil.memAlloc(indexCount * Short.BYTES);
         ShortBuffer idxs = buffer.asShortBuffer();
 
-        int j = 0;
-        for(int i = 0; i < vertexCount; i += 4) {
-            idxs.put(j + 0, (short) (i));
-            idxs.put(j + 1, (short) (i + 1));
-            idxs.put(j + 2, (short) (i + 2));
-            idxs.put(j + 3, (short) (i + 3));
-            idxs.put(j + 4, (short) (i + 2));
-            idxs.put(j + 5, (short) (i + 1));
+        for (int i = 0; i < indexCount; i++) {
+            idxs.put(i, (short) i);
+        }
 
-            j += 6;
+        return buffer;
+    }
+
+    /** 32-bit twin of {@link #genLinesIndices} for draws past the U16 range. */
+    public static ByteBuffer genIntLinesIndices(int vertexCount) {
+        int indexCount = vertexCount / 2 * 2;
+
+        ByteBuffer buffer = MemoryUtil.memAlloc(indexCount * Integer.BYTES);
+        IntBuffer idxs = buffer.asIntBuffer();
+
+        for (int i = 0; i < indexCount; i++) {
+            idxs.put(i, i);
         }
 
         return buffer;
@@ -248,7 +282,11 @@ public class AutoIndexBuffer {
         public static final int TRIANGLE_STRIP = 5;
         public static final int DEBUG_LINE_STRIP = 3;
         public static final int DEBUG_LINES = 1;
-        public static final int LINES = 1; // Emulates lines with quads
+        // Real GL_LINES: 2 vertices per segment, drawn as VK_LINE_LIST pairs.
+        // The width itself comes from the dynamic LINE_WIDTH state
+        // (vkCmdSetLineWidth), which this machine's driver supports
+        // (wideLines = true on the Intel Iris Xe, range 0..7.99).
+        public static final int LINES = 1;
 
 //        public final int n;
 

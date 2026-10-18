@@ -6,6 +6,7 @@ import com.yuhan123.vulkanmod.render.shader.ShaderInstance;
 import com.yuhan123.vulkanmod.render.shader.ShaderLoadUtil;
 
 import com.yuhan123.vulkanmod.render.shader.VkUniform;
+import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import com.yuhan123.vulkanmod.vulkan.shader.GraphicsPipeline;
 import com.yuhan123.vulkanmod.vulkan.shader.Pipeline;
 import com.yuhan123.vulkanmod.vulkan.util.MappedBuffer;
@@ -40,6 +41,16 @@ public abstract class PipelineManager {
             positionColorPipeline, positionNormalPipeline, positionTexPipeline, positionTexColorPipeline,
             positionTexColorNormalPipeline, positionTexLightmapColorPipeline, positionTexNormalPipeline,
             blitPipeline;
+
+    /**
+     * texGen variant of position_color, used by the end-portal starfield
+     * (TileEntityEndPortalRenderer draws POSITION_COLOR geometry with no UV
+     * attribute - the coordinates come from GL fixed-function texGen).
+     * Deliberately NOT registered in shaderMap: chooseShader routes to it by
+     * state, not by vertex format, so the plain position_color pipeline stays
+     * the answer for every other POSITION_COLOR draw.
+     */
+    private static ShaderInstance positionColorTexGenShader;
     private static Function<VertexFormat, GraphicsPipeline> shaderGetter;
     private final static Map<VertexFormat, ShaderInstance> shaderMap = new HashMap<>();
     public final static VertexFormat blitFormat = new VertexFormat();
@@ -95,6 +106,15 @@ public abstract class PipelineManager {
         positionTexLightmapColorPipeline = createPipeline("position_tex_lightmap_color", POSITION_TEX_LMAP_COLOR);
         positionTexNormalPipeline = createPipeline("position_tex_normal", POSITION_TEX_NORMAL);
         blitPipeline = createPipeline("blit", blitFormat);
+
+        // The end-portal pipeline. Unregistered (see the field comment), so a
+        // failure here must not take the whole core-pipeline set down with it -
+        // the portal would render flat, exactly as before this existed.
+        try {
+            positionColorTexGenShader = new ShaderInstance("position_color_texgen", POSITION_COLOR);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
 
@@ -139,6 +159,15 @@ public abstract class PipelineManager {
     private static ShaderInstance lastChosenShader;
 
     public static ShaderInstance chooseShader(VertexFormat vertexFormat) {
+        // texGen active: the end-portal starfield draws POSITION_COLOR geometry
+        // whose coordinates are generated in the shader (see
+        // position_color_texgen). Checked before the memo so toggling texGen
+        // can never serve a stale hit.
+        if (vertexFormat == POSITION_COLOR && VRenderSystem.texGenEnabled
+                && positionColorTexGenShader != null) {
+            return positionColorTexGenShader;
+        }
+
         if (vertexFormat == lastChosenFormat) {
             return lastChosenShader;
         }
@@ -238,5 +267,8 @@ public abstract class PipelineManager {
         positionTexColorNormalPipeline.cleanUp();
         positionTexLightmapColorPipeline.cleanUp();
         positionTexNormalPipeline.cleanUp();
+        if (positionColorTexGenShader != null) {
+            positionColorTexGenShader.getPipeline().cleanUp();
+        }
     }
 }

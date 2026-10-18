@@ -3,6 +3,9 @@ package com.yuhan123.vulkanmod.vulkan.memory.buffer;
 import com.yuhan123.vulkanmod.vulkan.memory.MemoryManager;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import com.yuhan123.vulkanmod.vulkan.memory.MemoryType;
+import org.lwjgl.system.MemoryUtil;
+
+import static org.lwjgl.system.libc.LibCString.nmemcpy;
 
 import java.nio.ByteBuffer;
 
@@ -33,8 +36,23 @@ public class Buffer {
     }
 
     public void resizeBuffer(long newSize) {
+        // A resize used to silently drop everything already written:
+        // createBuffer() allocates a brand-new VkBuffer, so slices recorded
+        // before the resize survived only as offsets into a buffer full of
+        // zeroes - which showed up as black/white draws rather than as an
+        // error. The old allocation is still alive at this point
+        // (addToFreeable only queues a BufferInfo snapshot for a later
+        // freeBuffers()), so carry the used range across before the fields
+        // are replaced.
+        final long oldPtr = this.dataPtr;
+        final long oldUsed = this.usedBytes;
+
         MemoryManager.getInstance().addToFreeable(this);
         this.createBuffer(newSize);
+
+        if (oldPtr != 0L && oldUsed > 0L && this.dataPtr != 0L) {
+            nmemcpy(this.dataPtr, oldPtr, oldUsed);
+        }
     }
 
     public void copyBuffer(ByteBuffer byteBuffer, int size) {

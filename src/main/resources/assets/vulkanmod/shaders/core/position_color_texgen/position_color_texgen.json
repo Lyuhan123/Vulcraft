@@ -1,0 +1,257 @@
+{
+  "blend": {
+    "func": "add",
+    "srcrgb": "srcalpha",
+    "dstrgb": "1-srcalpha"
+  },
+  "vertex": "position_color_texgen",
+  "fragment": "position_color_texgen",
+  "attributes": [
+    "Position",
+    "Color"
+  ],
+  "samplers": [
+    {
+      "name": "Sampler0"
+    }
+  ],
+  "uniforms": [
+    {
+      "name": "ColorModulator",
+      "type": "float",
+      "count": 4,
+      "values": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "TexGenEnabled",
+      "type": "float",
+      "count": 1,
+      "values": [
+        0.0
+      ]
+    },
+    {
+      "name": "FogStart",
+      "type": "float",
+      "count": 1,
+      "values": [
+        0.0
+      ]
+    },
+    {
+      "name": "FogEnd",
+      "type": "float",
+      "count": 1,
+      "values": [
+        1.0
+      ]
+    },
+    {
+      "name": "FogColor",
+      "type": "float",
+      "count": 4,
+      "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "FogEnabled",
+      "type": "float",
+      "count": 1,
+      "values": [
+        0.0
+      ]
+    }
+  ],
+  "PushConstants": [
+    {
+      "name": "MVP",
+      "type": "matrix4x4",
+      "count": 16,
+      "values": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    }
+  ],
+  "UBOs": [
+    {
+      "type": "vertex",
+      "binding": 0,
+      "fields": [
+        {
+          "name": "ModelViewMat",
+          "type": "matrix4x4",
+          "count": 16,
+          "values": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        {
+          "name": "TextureMat",
+          "type": "matrix4x4",
+          "count": 16,
+          "values": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        {
+          "name": "TexGenPlaneS",
+          "type": "float",
+          "count": 4,
+          "values": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "TexGenPlaneT",
+          "type": "float",
+          "count": 4,
+          "values": [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "TexGenPlaneR",
+          "type": "float",
+          "count": 4,
+          "values": [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "name": "TexGenPlaneQ",
+          "type": "float",
+          "count": 4,
+          "values": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        {
+          "name": "TexGenEnabled",
+          "type": "float",
+          "count": 1,
+          "values": [
+            0.0
+          ]
+        }
+      ]
+    },
+    {
+      "type": "fragment",
+      "binding": 1,
+      "fields": [
+        {
+          "name": "ColorModulator",
+          "type": "float",
+          "count": 4,
+          "values": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "FogColor",
+          "type": "float",
+          "count": 4,
+          "values": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "FogStart",
+          "type": "float",
+          "count": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "name": "FogEnd",
+          "type": "float",
+          "count": 1,
+          "values": [
+            1.0
+          ]
+        },
+        {
+          "name": "FogEnabled",
+          "type": "float",
+          "count": 1,
+          "values": [
+            0.0
+          ]
+        }
+      ]
+    }
+  ]
+}

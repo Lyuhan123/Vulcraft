@@ -647,12 +647,13 @@ public class PipelineState {
 
         private static int glToVulkan(int value) {
             return switch (value) {
+                case 0 -> VK_BLEND_FACTOR_ZERO;
                 case 515 -> VK_COMPARE_OP_LESS_OR_EQUAL;
                 case 519 -> VK_COMPARE_OP_ALWAYS;
                 case 516 -> VK_COMPARE_OP_GREATER;
                 case 518 -> VK_COMPARE_OP_GREATER_OR_EQUAL;
                 case 514 -> VK_COMPARE_OP_EQUAL;
-                default -> throw new RuntimeException("unknown blend factor..");
+                default -> throw new RuntimeException("unknown blend factor.." + value);
 
 //                case 515 -> VK_COMPARE_OP_GREATER_OR_EQUAL;
 //                case 519 -> VK_COMPARE_OP_ALWAYS;

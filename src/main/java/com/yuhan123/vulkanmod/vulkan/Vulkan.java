@@ -46,7 +46,8 @@ public class Vulkan {
      * FPS cost (draw recording alone was ~17ms of the frame). Off by default;
      * re-enable with -Dvulkanmod.validationLayers=true.
      */
-    public static final boolean ENABLE_VALIDATION_LAYERS = false;
+    public static final boolean ENABLE_VALIDATION_LAYERS =
+            Boolean.getBoolean("vulkanmod.validationLayers");
 
     //    public static final boolean DYNAMIC_RENDERING = true;
     public static final boolean DYNAMIC_RENDERING = false;
@@ -150,10 +151,44 @@ public class Vulkan {
         createCommandPool();
 
         setupDepthFormat();
+        // Arm the minimise/restore poll before the first frame is built, so a
+        // game that starts minimised never tries to create a swapchain for a
+        // 0x0 surface.
+        Renderer.installWindowCallbacks(window);
         Renderer.initRenderer();
     }
 
     private static long glContextWindow;
+
+    /**
+     * GLCapabilities of the hidden GL context, captured on the main thread
+     * (which is the only thread that ever has it current).
+     *
+     * <p>lwjglx's {@code GLContext} builds its {@code ContextCapabilities}
+     * singleton from whichever thread touches it first, and its constructor
+     * forwards to {@code GL.getCapabilities()} - which throws on any thread
+     * without a current GL context. Loading-screen mods (CustomLoadingScreen)
+     * call {@code GLContext.getCapabilities()} from the splash thread, which
+     * has none, so without this stash that first touch would kill the splash
+     * with an ExceptionInInitializerError. See GlContextMixin.
+     */
+    private static org.lwjgl.opengl.GLCapabilities hiddenContextCaps;
+
+    /** Main thread, after lwjglx's Display.create() has created the caps. */
+    public static void stashHiddenContextCaps() {
+        try {
+            hiddenContextCaps = org.lwjgl.opengl.GL.getCapabilities();
+            VulkanMod.LOGGER.info("[GLCTX] stashed hidden-context GLCapabilities (GL_KHR_debug={})",
+                    hiddenContextCaps != null && hiddenContextCaps.GL_KHR_debug);
+        } catch (Throwable t) {
+            VulkanMod.LOGGER.warn("[GLCTX] could not stash GLCapabilities on the main thread: {}", t.toString());
+        }
+    }
+
+    /** May be null if the main thread never had caps; callers must cope. */
+    public static org.lwjgl.opengl.GLCapabilities getHiddenContextCaps() {
+        return hiddenContextCaps;
+    }
 
     /**
      * Creates (once) a hidden GLFW window with a GL context and makes it current

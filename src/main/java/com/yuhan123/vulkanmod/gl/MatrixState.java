@@ -170,6 +170,11 @@ public class MatrixState {
         FrameProfiler.addMatrixOp(__t, FrameProfiler.MAT_TRANSLATE);
     }
 
+    public static void loadMatrix(FloatBuffer matrix) {
+        current().set(matrix);
+        apply();
+    }
+
     public static void translate(double x, double y, double z) {
         translate((float) x, (float) y, (float) z);
     }

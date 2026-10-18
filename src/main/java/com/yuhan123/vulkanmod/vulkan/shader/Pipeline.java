@@ -495,10 +495,19 @@ public abstract class Pipeline {
         }
 
         protected void bindSets(VkCommandBuffer commandBuffer, UniformBuffer uniformBuffer, int bindPoint) {
-            // Evaluated before updateUniforms: it inspects the currently bound
-            // set/UBO ids, not the slices updateUniforms is about to write.
-            final boolean descriptorChanged = needsUpdate(uniformBuffer);
+            // updateUniforms FIRST, needsUpdate second. needsUpdate compares the
+            // bound buffer *ids*, and updateUniforms is what can change one:
+            // UniformBuffer.checkCapacity() calls resizeBuffer() when a slice
+            // does not fit, which allocates a brand-new VkBuffer. Evaluating
+            // needsUpdate before it therefore saw the pre-resize id, reported
+            // "unchanged", skipped updateDescriptorSet, and left the set
+            // pointing at the old (already freed) buffer with its old, smaller
+            // size - while the dynamic offset had already moved past that size.
+            // That is both a use-after-free and VUID-vkCmdBindDescriptorSets-
+            // pDescriptorSets-01979. Reordering makes the comparison see the id
+            // that is actually about to be bound.
             final boolean uniformsChanged = updateUniforms(uniformBuffer);
+            final boolean descriptorChanged = needsUpdate(uniformBuffer);
 
 
             // Nothing about this bind would differ from the one already issued in

@@ -30,6 +30,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import com.yuhan123.vulkanmod.mixin.vertex.VertexBufferAccessor;
+import static com.yuhan123.vulkanmod.render.chunk.ChunkAreaManager.*;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
@@ -84,10 +85,6 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 @Mixin(VboRenderList.class)
 public class VboRenderListMixin {
 
-    private static final int STRIDE = 28; // DefaultVertexFormats.BLOCK
-    private static final int QUAD_ALIGNMENT_BYTES = 4 * STRIDE;
-    private static final int AREA_MAX_BYTES = 48 * 1024 * 1024;
-    private static final int LAYER_COUNT = 4; // BlockRenderLayer.values().length
 
     // Terrain batching is gated by TERRAIN_BATCH. These used to be frozen
     // `static final` fields evaluated when this mixin class is first loaded by
@@ -130,7 +127,7 @@ public class VboRenderListMixin {
     // bindBuffer() + reflected vertex-count lookup that the vanilla per-section
     // path performs for EVERY visible section (~337 x 4 / frame). The registry
     // maps each RenderChunk to its stable persistent-VBO id + vertex count, so
-    // the area offset is recovered from secCache with two HashMap.gets instead
+    // the area offset is recovered from secCache() with two HashMap.gets instead
     // of a native GL call + reflection. Draws/geometry are unchanged, so the
     // only observable effect is lower camWorld. Default OFF (current proven path).
     private static boolean REGION_WANTED;
@@ -139,10 +136,8 @@ public class VboRenderListMixin {
     // recreation between frames - the original RenderChunk-keyed map never hit
     // because those instances are reallocated every frame. Cleared on a stride
     // re-scan (see drawBatched) so a chunk rebuild (new persistent id) is caught.
-    private static final Map[] secReg = new HashMap[LAYER_COUNT];
     private static final long[] regLastFull = new long[LAYER_COUNT];
     // set when an area-buffer growth reset this layer's caches; next frame re-derives
-    private static final boolean[] regionDirty = new boolean[LAYER_COUNT];
     // pooled section arrays (reused across frames) to kill the per-frame
     // new long[6] allocation that dominates the GC cost of the collection loop.
     private static final List<long[]> secPool = new ArrayList<>();
@@ -156,14 +151,12 @@ public class VboRenderListMixin {
     // per-frame Java traversal of every visible section is skipped in steady state
     // (cached sections are flagged alive with a single HashMap.get). Default OFF.
     private static boolean AREA_WANTED;
-    private static final int AREA_SHIFT = 5; // 32-block (2-chunk) areas -> a few dozen areas
     // stable per-layer: posKey(x,y,z,layer) -> {offset, vc, x, y, z, areaId, lastSeen, pid}
     private static final Map[] areaSec = new HashMap[LAYER_COUNT];
     private static final Map[] areaToPids = new HashMap[LAYER_COUNT]; // areaId -> List<posKey>
     private static final boolean[] areaDirty = new boolean[LAYER_COUNT];
     private static final long[] areaLastFull = new long[LAYER_COUNT];
 
-    private static Buffer[] areaVtx = new Buffer[LAYER_COUNT]; // per layer, zero-filled
     private static AutoIndexBuffer autoIdx;
     private static long tbatchFrameCounter;
 
@@ -177,8 +170,6 @@ public class VboRenderListMixin {
     private static int batchResets;
 
     // persistent section cache, per layer: srcVkBufferId -> {dstByte, vc}
-    private static final Map[] secCache = new HashMap[LAYER_COUNT];
-    private static final int[] areaUsed = new int[LAYER_COUNT];
 
     // Freed [offset, size) byte ranges of the per-layer area buffer, kept sorted
     // by offset and coalesced with their neighbours. allocRange() recycles them
@@ -186,7 +177,7 @@ public class VboRenderListMixin {
     // forever.
     //
     // Without this, an unloaded or rebuilt section only had its range ZEROED,
-    // never returned, so areaUsed climbed monotonically for the whole session.
+    // never returned, so areaUsed() climbed monotonically for the whole session.
     // Chunk loading is exactly when new sections arrive fastest, so it was also
     // when the arena filled up: the layer either grew its buffer (16MB -> 48MB,
     // each growth discarding the contents and forcing a full re-upload of every
@@ -194,16 +185,13 @@ public class VboRenderListMixin {
     // three of those inside a 600-tick window disabled batching for the rest of
     // the session. That whole failure mode is what made chunk loading slower
     // than vanilla.
-    private static final List[] freeRanges = new ArrayList[LAYER_COUNT];
 
     // --- per-call scratch ---
     private static final List<long[]> secList = new ArrayList<>(); // {srcVkBufferId, dstByte, vc, x, y, z}
     private static final List<ByteBuffer> secData = new ArrayList<>(); // parallel: client bytes or null
     private static final List<com.yuhan123.vulkanmod.vulkan.memory.buffer.VertexBuffer> secVb = new ArrayList<>(); // parallel: persistent (for readback)
 
-    private static ByteBuffer gatherBB = alloc(4 * 1024 * 1024);
     private static ByteBuffer verifyBB = alloc(4 * 1024 * 1024);
-    private static ByteBuffer zeroBB = alloc(1024 * 1024); // zero-fill scratch
 
     private static ByteBuffer alloc(int bytes) {
         return ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
@@ -291,6 +279,19 @@ public class VboRenderListMixin {
         if (!batchActive) {
             return; // vanilla path untouched
         }
+        // No render pass is open, so there is no command buffer to record into.
+        // This is the normal state while the window is minimised: beginFrame()
+        // returns before opening the pass (see Renderer.beginFrame), but MC's
+        // render loop keeps calling renderChunkLayer every frame because it has
+        // no idea the swapchain is gone. Recording vkCmdDrawIndexed into a
+        // command buffer that was never begun is a usage violation that the
+        // Intel display driver answers with EXCEPTION_ACCESS_VIOLATION - the
+        // "minimising sometimes crashes" report. Cancel instead of drawing;
+        // nothing is presented this frame anyway.
+        if (!Renderer.isRecording()) {
+            ci.cancel();
+            return;
+        }
         if (TRANS_VANILLA && layer == BlockRenderLayer.TRANSLUCENT) {
             return; // ARM B: pre-DrawBuffers behaviour (vanilla per-section translucent)
         }
@@ -318,10 +319,10 @@ public class VboRenderListMixin {
 
             if (++tbatchFrameCounter % 600L == 1L) {
                 VKProf.info("[VKPROF] TBATCH active layer={} batchedLayersDrawn={} cachedSections={} (compare fps/gpuPass/cpu vs VULKANMOD_TERRAIN_BATCH unset)",
-                        layer, tbatchFrameCounter, secCache[layer.ordinal()].size());
+                        layer, tbatchFrameCounter, secCache()[layer.ordinal()].size());
                 if (REGION_WANTED) {
                     VKProf.info("[VKPROF] TBATCH region hit={} miss={} regSize={}",
-                            regHitMiss[0], regHitMiss[1], secReg[layer.ordinal()].size());
+                            regHitMiss[0], regHitMiss[1], secReg()[layer.ordinal()].size());
                     regHitMiss[0] = 0; regHitMiss[1] = 0;
                 }
             }
@@ -339,18 +340,18 @@ public class VboRenderListMixin {
             // cover a catch that fires while initBatch() itself is still
             // failing (cache maps not yet assigned).
             final int layerIdx = layer.ordinal();
-            if (secCache[layerIdx] != null) {
-                secCache[layerIdx].clear();
-                areaUsed[layerIdx] = 0;
+            if (secCache()[layerIdx] != null) {
+                secCache()[layerIdx].clear();
+                areaUsed()[layerIdx] = 0;
                 // Every offset is being re-derived from 0, so the free pool's
                 // ranges no longer describe anything: drop it too.
-                if (freeRanges[layerIdx] != null) {
-                    freeRanges[layerIdx].clear();
+                if (freeRanges()[layerIdx] != null) {
+                    freeRanges()[layerIdx].clear();
                 }
-                if (REGION_WANTED && secReg[layerIdx] != null) {
-                    secReg[layerIdx].clear();
+                if (REGION_WANTED && secReg()[layerIdx] != null) {
+                    secReg()[layerIdx].clear();
                     regLastFull[layerIdx] = 0L;
-                    regionDirty[layerIdx] = true;
+                    regionDirty()[layerIdx] = true;
                 }
                 if (AREA_WANTED && areaSec[layerIdx] != null) {
                     areaSec[layerIdx].clear();
@@ -388,12 +389,12 @@ public class VboRenderListMixin {
 
     private static void initBatch() throws Exception {
         for (int i = 0; i < LAYER_COUNT; i++) {
-            areaVtx[i] = areaBuffer(16 * 1024 * 1024);
-            secCache[i] = new HashMap();
-            secReg[i] = new HashMap();
-            freeRanges[i] = new ArrayList();
+            areaVtx()[i] = areaBuffer(16 * 1024 * 1024);
+            secCache()[i] = new HashMap();
+            secReg()[i] = new HashMap();
+            freeRanges()[i] = new ArrayList();
             regLastFull[i] = 0L;
-            regionDirty[i] = false;
+            regionDirty()[i] = false;
             areaSec[i] = new HashMap();
             areaToPids[i] = new HashMap();
             areaDirty[i] = false;
@@ -405,229 +406,9 @@ public class VboRenderListMixin {
 
     // ===================== area buffer range allocation =====================
 
-    /** Rounds a byte length up to a whole quad, so every range boundary stays
-     *  on the shared index pattern's quad grid. */
-    private static int alignQuad(int bytes) {
-        return (bytes + QUAD_ALIGNMENT_BYTES - 1) / QUAD_ALIGNMENT_BYTES * QUAD_ALIGNMENT_BYTES;
-    }
-
-    // NOTE: zeroRange(Buffer, int, int) already exists further down (it was
-    // introduced for the AREA path) and is reused here as-is.
-
-    /**
-     * Hands a range back to the layer's free pool: zeroes it, inserts it sorted
-     * by offset, and merges it with an immediately adjacent range on either side
-     * so the pool does not fragment into unusable slivers.
-     */
-    private static void releaseRange(int layerIdx, Buffer area, int offset, int size) {
-        if (size <= 0) {
-            return;
-        }
-        // Draws are bounded to each section's own [start, start+vertexCount)
-        // range and runs only coalesce across EXACTLY contiguous sections, so a
-        // released range is never rasterised. It is zeroed anyway: the padding a
-        // recycled range leaves behind must not hold stale geometry.
-        zeroRange(area, offset, size);
-
-        final List<int[]> list = freeRanges[layerIdx];
-        if (list == null) {
-            return;
-        }
-        int at = 0;
-        while (at < list.size() && ((int[]) list.get(at))[0] < offset) {
-            at++;
-        }
-        list.add(at, new int[]{offset, size});
-
-        if (at > 0) {
-            final int[] prev = (int[]) list.get(at - 1);
-            final int[] cur = (int[]) list.get(at);
-            if (prev[0] + prev[1] == cur[0]) {
-                prev[1] += cur[1];
-                list.remove(at);
-                at--;
-            }
-        }
-        if (at + 1 < list.size()) {
-            final int[] cur = (int[]) list.get(at);
-            final int[] next = (int[]) list.get(at + 1);
-            if (cur[0] + cur[1] == next[0]) {
-                cur[1] += next[1];
-                list.remove(at + 1);
-            }
-        }
-    }
-
-    /**
-     * Reserves {@code bytes} in this layer's area buffer, recycling a freed
-     * range when one fits and only otherwise advancing the bump pointer.
-     *
-     * @return the byte offset to write at, or -1 if the buffer had to be grown
-     *         in the slow way (contents discarded, caches invalidated) and the
-     *         caller must fall back to vanilla for this frame.
-     */
-    private static int allocRange(int layerIdx, Buffer areaIn, int bytes) throws Exception {
-        // Carve whole quads: a free range starts on a quad boundary and the
-        // remainder has to keep that invariant, or the next section allocated
-        // out of it would tear across the shared index pattern.
-        final int need = alignQuad(bytes);
-
-        final List<int[]> list = freeRanges[layerIdx];
-        if (list != null) {
-            for (int i = 0; i < list.size(); i++) {
-                final int[] r = (int[]) list.get(i);
-                if (r[1] >= need) {
-                    final int dst = r[0];
-                    r[0] = dst + need;
-                    r[1] -= need;
-                    if (r[1] <= 0) {
-                        list.remove(i);
-                    }
-                    return dst;
-                }
-            }
-        }
-
-        final int dst = alignQuad(areaUsed[layerIdx]);
-        if (dst + bytes > areaIn.getBufferSize()) {
-            final long want = Math.max(dst + bytes, (long) areaIn.getBufferSize() * 2L);
-            final int newSize = (int) Math.min(AREA_MAX_BYTES, want);
-            if (newSize < dst + bytes) {
-                throw new IllegalStateException("area buffer exhausted: " + areaUsed[layerIdx] + " + " + bytes);
-            }
-            // Grow by COPYING the old contents (see areaBufferGrow). Allocating a
-            // fresh zeroed buffer instead invalidates every cached offset, and
-            // the next frame then re-bakes and re-uploads every visible section -
-            // the single most expensive thing this path can do.
-            final Buffer grown = areaBufferGrow(areaIn, newSize);
-            if (grown == null) {
-                areaVtx[layerIdx] = areaBuffer(newSize);
-                if (secCache[layerIdx] != null) {
-                    secCache[layerIdx].clear();
-                }
-                if (secReg[layerIdx] != null) {
-                    secReg[layerIdx].clear();
-                }
-                if (freeRanges[layerIdx] != null) {
-                    freeRanges[layerIdx].clear();
-                }
-                areaUsed[layerIdx] = 0;
-                regionDirty[layerIdx] = true;
-                VKProf.info("[VKPROF] TBATCH area buffer[{}] grown to {} bytes (no device-side copy); caches reset, fallback this frame",
-                        Integer.valueOf(layerIdx), Integer.valueOf(newSize));
-                return -1;
-            }
-            areaVtx[layerIdx] = grown;
-            VKProf.info("[VKPROF] TBATCH area buffer[{}] grown to {} bytes by copy; offsets preserved",
-                    Integer.valueOf(layerIdx), Integer.valueOf(newSize));
-        }
-        areaUsed[layerIdx] = dst + bytes;
-        return dst;
-    }
-
-    /**
-     * Grows an area buffer to {@code newSize} while PRESERVING its contents: the
-     * old bytes are copied device-side and only the new tail is zero-filled.
-     *
-     * <p>Vulkan does not guarantee device memory to be zeroed, so the tail must
-     * still be filled - but only the tail, not the whole allocation.
-     *
-     * @return the new buffer, or null when no device-side copy is available
-     *         (host-memory fallback), leaving the caller to rebuild from scratch.
-     */
-    private static Buffer areaBufferGrow(Buffer old, int newSize) throws Exception {
-        if (!(old.type instanceof MemoryTypes.DeviceLocalMemory)) {
-            return null;
-        }
-        final Buffer b = new Buffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, MemoryTypes.GPU_MEM);
-        b.createBuffer(newSize);
-        // Synchronous on purpose. DeviceLocalMemory.copyBuffer() goes through
-        // TransferQueue.copyBufferCmd(), which only SUBMITS - no wait, no
-        // semaphore to the graphics queue. That is fine for the steady-state
-        // uploads (this port already relies on it), but a grow copy still in
-        // flight when this frame's draws are submitted would tear the whole
-        // layer. Growing is rare, so paying the fence here is cheap insurance.
-        DeviceManager.getTransferQueue().uploadBufferImmediate(
-                old.getId(), 0L, b.getId(), 0L, old.getBufferSize());
-        zeroRange(b, (int) old.getBufferSize(), newSize - (int) old.getBufferSize());
-        return b;
-    }
-
-    /**
-     * Device-local (VRAM) vertex buffer. Terrain geometry is static per section
-     * (cached), so it is uploaded ONCE per section via the staging buffer and
-     * then stays resident in VRAM - the GPU never re-fetches it from system
-     * memory every frame. A HOST_MEM area would cost a per-frame PCIe vertex
-     * transfer on a discrete GPU (the real "copied every frame" cost). Vulkan
-     * does not guarantee device memory to be zeroed, so zero-fill the
-     * allocation: any unwritten vertex the single big draw might touch must
-     * rasterize as degenerate, not garbage.
-     */
-    private static Buffer areaBuffer(int size) throws Exception {
-        final Buffer b = new Buffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, MemoryTypes.GPU_MEM);
-        b.createBuffer(size);
-        zeroBB.position(0).limit(zeroBB.capacity());
-        for (int off = 0; off < size; off += zeroBB.capacity()) {
-            final int chunk = Math.min(zeroBB.capacity(), size - off);
-            b.type.copyToBuffer(b, zeroBB, chunk, 0, off);
-        }
-        return b;
-    }
 
     // ===================== Third-knife: area-grouped path =====================
 
-    private static long areaIdOf(int x, int y, int z, int layer) {
-        final long ax = ((long) x) >> AREA_SHIFT;
-        final long ay = ((long) y) >> AREA_SHIFT;
-        final long az = ((long) z) >> AREA_SHIFT;
-        return ((long) layer << 62)
-                | ((ax & 0x1FFFFFL) << 42)
-                | ((ay & 0x1FFFFFL) << 21)
-                | (az & 0x1FFFFFL);
-    }
-
-    private static int safeCount(VertexBuffer vbo) {
-        try {
-            return ((VertexBufferAccessor) vbo).getCount();
-        } catch (Throwable ex) {
-            return 0;
-        }
-    }
-
-    private static void bakeUpload(Buffer layerArea, int dst, int bytes, ByteBuffer data,
-                                   com.yuhan123.vulkanmod.vulkan.memory.buffer.VertexBuffer persistent,
-                                   int sx, int sy, int sz) {
-        if (gatherBB.capacity() < bytes) {
-            gatherBB = alloc(Math.max(bytes, gatherBB.capacity() * 2));
-        }
-        gatherBB.position(0).limit(bytes);
-        if (data != null) {
-            data.position(0).limit(bytes);
-            gatherBB.put(data);
-            gatherBB.position(0);
-        } else {
-            MemoryTypes.HOST_MEM.copyFromBuffer(persistent, bytes, gatherBB);
-            gatherBB.position(0);
-        }
-        final int vcount = bytes / STRIDE;
-        for (int v = 0; v < vcount; v++) {
-            final int o = v * STRIDE;
-            gatherBB.putFloat(o, gatherBB.getFloat(o) + sx);
-            gatherBB.putFloat(o + 4, gatherBB.getFloat(o + 4) + sy);
-            gatherBB.putFloat(o + 8, gatherBB.getFloat(o + 8) + sz);
-        }
-        gatherBB.position(0);
-        layerArea.type.copyToBuffer(layerArea, gatherBB, bytes, 0, dst);
-    }
-
-    private static void zeroRange(Buffer layerArea, int dst, int bytes) {
-        if (bytes <= 0) return;
-        zeroBB.position(0).limit(zeroBB.capacity());
-        for (int off = 0; off < bytes; off += zeroBB.capacity()) {
-            final int chunk = Math.min(zeroBB.capacity(), bytes - off);
-            layerArea.type.copyToBuffer(layerArea, zeroBB, chunk, 0, dst + off);
-        }
-    }
 
     /**
      * Emits one area: gathers the sections visible THIS frame, builds draw params,
@@ -719,7 +500,7 @@ public class VboRenderListMixin {
             return false;
         }
         final int layerIdx = layer.ordinal();
-        final Buffer layerArea = areaVtx[layerIdx];
+        final Buffer layerArea = areaVtx()[layerIdx];
         final Map<Long, long[]> cache = areaSec[layerIdx];
         final Map<Long, List<Long>> a2p = areaToPids[layerIdx];
         final int frame = (int) (tbatchFrameCounter & 0x7FFFFFFF);
@@ -727,14 +508,14 @@ public class VboRenderListMixin {
 
         if (areaDirty[layerIdx]) {
             areaDirty[layerIdx] = false;
-            areaUsed[layerIdx] = 0;
+            areaUsed()[layerIdx] = 0;
             cache.clear();
             a2p.clear();
             // Offsets are re-derived from 0, so the free pool no longer describes
             // anything. (The AREA path keeps its own bump allocation and does not
-            // feed freeRanges, so this only has to drop stale entries.)
-            if (freeRanges[layerIdx] != null) {
-                freeRanges[layerIdx].clear();
+            // feed freeRanges(), so this only has to drop stale entries.)
+            if (freeRanges()[layerIdx] != null) {
+                freeRanges()[layerIdx].clear();
             }
         }
 
@@ -794,24 +575,24 @@ public class VboRenderListMixin {
                 }
                 if (vc <= 0) continue;
                 final int bytes = vc * STRIDE;
-                int dst = (areaUsed[layerIdx] + QUAD_ALIGNMENT_BYTES - 1) / QUAD_ALIGNMENT_BYTES * QUAD_ALIGNMENT_BYTES;
+                int dst = (areaUsed()[layerIdx] + QUAD_ALIGNMENT_BYTES - 1) / QUAD_ALIGNMENT_BYTES * QUAD_ALIGNMENT_BYTES;
                 if (dst + bytes > layerArea.getBufferSize()) {
                     final int newSize = (int) Math.min(AREA_MAX_BYTES,
                             Math.max(dst + bytes, (long) layerArea.getBufferSize() * 2L));
-                    areaVtx[layerIdx] = areaBuffer(newSize);
+                    areaVtx()[layerIdx] = areaBuffer(newSize);
                     cache.clear();
                     a2p.clear();
-                    areaUsed[layerIdx] = 0;
+                    areaUsed()[layerIdx] = 0;
                     areaDirty[layerIdx] = true;
-                    if (freeRanges[layerIdx] != null) {
-                        freeRanges[layerIdx].clear();
+                    if (freeRanges()[layerIdx] != null) {
+                        freeRanges()[layerIdx].clear();
                     }
                     VKProf.info("[VKPROF] TBAREA layer={} area buffer grown to {} bytes; fallback this frame", layerIdx, newSize);
                     return false;
                 }
                 if (e != null) zeroRange(layerArea, (int) e[0], (int) e[1] * STRIDE); // rebuild: kill old range
                 bakeUpload(layerArea, dst, bytes, data, persistent, bp.getX(), bp.getY(), bp.getZ());
-                areaUsed[layerIdx] = dst + bytes;
+                areaUsed()[layerIdx] = dst + bytes;
                 final long areaId = areaIdOf(bp.getX(), bp.getY(), bp.getZ(), layerIdx);
                 e = new long[]{dst, vc, bp.getX(), bp.getY(), bp.getZ(), areaId, frame, pid};
                 cache.put(key, e);
@@ -929,20 +710,20 @@ public class VboRenderListMixin {
 
         final int layerIdx = layer.ordinal();
         // a growth in a previous frame reset this layer's caches; start clean
-        if (regionDirty[layerIdx]) {
-            regionDirty[layerIdx] = false;
-            areaUsed[layerIdx] = 0;
-            if (freeRanges[layerIdx] != null) {
-                freeRanges[layerIdx].clear();
+        if (regionDirty()[layerIdx]) {
+            regionDirty()[layerIdx] = false;
+            areaUsed()[layerIdx] = 0;
+            if (freeRanges()[layerIdx] != null) {
+                freeRanges()[layerIdx].clear();
             }
             if (REGION_WANTED) {
-                secReg[layerIdx].clear();
+                secReg()[layerIdx].clear();
             }
         }
         // Deliberately NOT final: allocRange() can grow the buffer by copying,
         // after which this local has to be re-pointed at the new one.
-        Buffer layerArea = areaVtx[layerIdx];
-        final Map<Long, int[]> cache = secCache[layerIdx];
+        Buffer layerArea = areaVtx()[layerIdx];
+        final Map<Long, int[]> cache = secCache()[layerIdx];
 
         // ghost expiry: when a section rebuilds, vanilla may allocate a NEW GL
         // buffer, orphaning the old cache entry - its stale geometry would be
@@ -988,7 +769,7 @@ public class VboRenderListMixin {
             if (REGION_WANTED && !forceRescan) {
                 final net.minecraft.util.math.BlockPos bp = rc.getPosition();
                 final long key = packKey(bp.getX(), bp.getY(), bp.getZ(), layerIdx);
-                final long[] reg = (long[]) secReg[layerIdx].get(Long.valueOf(key));
+                final long[] reg = (long[]) secReg()[layerIdx].get(Long.valueOf(key));
                 if (reg != null) {
                 final int[] c = cache.get(reg[0]);
                 // validate the cached entry's baked POSITION too: a freed
@@ -1003,7 +784,7 @@ public class VboRenderListMixin {
                         fromReg = true;
                         regHitMiss[0]++;
                     } else {
-                        secReg[layerIdx].remove(Long.valueOf(key));
+                        secReg()[layerIdx].remove(Long.valueOf(key));
                         regHitMiss[1]++;
                     }
                 } else {
@@ -1038,10 +819,10 @@ public class VboRenderListMixin {
                 }
                 if (REGION_WANTED) {
                     // cap registry to avoid unbounded growth across chunk unloads
-                    if (secReg[layerIdx].size() > 32768) {
-                        secReg[layerIdx].clear();
+                    if (secReg()[layerIdx].size() > 32768) {
+                        secReg()[layerIdx].clear();
                     }
-                    secReg[layerIdx].put(Long.valueOf(packKey(sx, sy, sz, layerIdx)),
+                    secReg()[layerIdx].put(Long.valueOf(packKey(sx, sy, sz, layerIdx)),
                             new long[]{pid, vc, 0L, sx, sy, sz, 0L});
                 }
             }
@@ -1104,7 +885,7 @@ public class VboRenderListMixin {
                     return false; // grown the slow way: vanilla renders this frame
                 }
                 // allocRange may have swapped in a bigger buffer (grown by copy).
-                layerArea = areaVtx[layerIdx];
+                layerArea = areaVtx()[layerIdx];
                 entry = new int[]{dst, vc, (int) (tbatchFrameCounter & 0x7FFFFFFF), (int) s[3], (int) s[4], (int) s[5]};
                 if (cacheable) {
                     cache.put(srcId, entry);
@@ -1121,29 +902,15 @@ public class VboRenderListMixin {
             // ---- upload: bake the section's world offset into the vertex
             // positions (one-time), then write directly into the host-visible
             // area buffer ----
-            final float sx = (int) s[3], sy = (int) s[4], sz = (int) s[5];
-            if (gatherBB.capacity() < bytes) {
-                gatherBB = alloc(Math.max(bytes, gatherBB.capacity() * 2));
-            }
-            gatherBB.position(0).limit(bytes);
-            final ByteBuffer data = secData.get(i);
-            if (data != null) {
-                data.position(0).limit(bytes);
-                gatherBB.put(data);
-                gatherBB.position(0);
-            } else {
-                final com.yuhan123.vulkanmod.vulkan.memory.buffer.VertexBuffer vb = secVb.get(i);
-                MemoryTypes.HOST_MEM.copyFromBuffer(vb, bytes, gatherBB);
-                gatherBB.position(0);
-            }
-            for (int v = 0; v < vc; v++) {
-                final int o = v * STRIDE;
-                gatherBB.putFloat(o, gatherBB.getFloat(o) + sx);
-                gatherBB.putFloat(o + 4, gatherBB.getFloat(o + 4) + sy);
-                gatherBB.putFloat(o + 8, gatherBB.getFloat(o + 8) + sz);
-            }
-            gatherBB.position(0);
-            layerArea.type.copyToBuffer(layerArea, gatherBB, bytes, 0, entry[0]);
+            // Section origins are integer block coordinates; bakeUpload takes
+            // ints (they are only widened to float when added to the positions).
+            final int sx = (int) s[3], sy = (int) s[4], sz = (int) s[5];
+            // P1b: this block used to be an inline duplicate of
+            // ChunkAreaManager.bakeUpload. The copy had already drifted (it grew
+            // the gather buffer by assigning to an accessor call, which does not
+            // compile once the state moved out), so call the shared
+            // implementation instead - the two paths can no longer drift apart.
+            bakeUpload(layerArea, (int) entry[0], bytes, secData.get(i), secVb.get(i), sx, sy, sz);
             if (verify && entry[0] == 0 && layerArea.type.mappable()) {
                 if (verifyBB.capacity() < bytes) {
                     verifyBB = alloc(Math.max(bytes, verifyBB.capacity() * 2));
@@ -1151,15 +918,15 @@ public class VboRenderListMixin {
                 verifyBB.position(0).limit(bytes);
                 MemoryTypes.HOST_MEM.copyFromBuffer(layerArea, bytes, verifyBB);
                 verifyBB.position(0);
-                gatherBB.position(0);
+                gatherBuffer().position(0);
                 boolean ok = true;
                 for (int b2 = 0; b2 < bytes; b2++) {
-                    if (gatherBB.get(b2) != verifyBB.get(b2)) {
+                    if (gatherBuffer().get(b2) != verifyBB.get(b2)) {
                         ok = false;
                         break;
                     }
                 }
-                final float px = gatherBB.getFloat(0), py = gatherBB.getFloat(4), pz = gatherBB.getFloat(8);
+                final float px = gatherBuffer().getFloat(0), py = gatherBuffer().getFloat(4), pz = gatherBuffer().getFloat(8);
                 VKProf.info("[VKPROF] TBATCH verify first section ({} bytes): {} firstBakedPos=({},{},{})",
                         bytes, ok ? "OK" : "MISMATCH", px, py, pz);
             }
@@ -1169,8 +936,8 @@ public class VboRenderListMixin {
             if (tbatchFrameCounter == 40 || tbatchFrameCounter == 401 || tbatchFrameCounter == 4001) {
                 VKProf.info("[VKPROF] TBATCH bake layer={} secOrigin=({},{},{}) rawLocal=({},{},{}) bakedWorld=({},{},{})",
                         layer, (int) s[3], (int) s[4], (int) s[5],
-                        gatherBB.getFloat(0), gatherBB.getFloat(4), gatherBB.getFloat(8),
-                        gatherBB.getFloat(0) + sx, gatherBB.getFloat(4) + sy, gatherBB.getFloat(8) + sz);
+                        gatherBuffer().getFloat(0), gatherBuffer().getFloat(4), gatherBuffer().getFloat(8),
+                        gatherBuffer().getFloat(0) + sx, gatherBuffer().getFloat(4) + sy, gatherBuffer().getFloat(8) + sz);
             }
         }
 

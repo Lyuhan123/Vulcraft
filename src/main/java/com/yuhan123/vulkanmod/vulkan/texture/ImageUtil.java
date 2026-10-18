@@ -1,6 +1,7 @@
 package com.yuhan123.vulkanmod.vulkan.texture;
 
 import com.yuhan123.vulkanmod.VulkanMod;
+import com.yuhan123.vulkanmod.gl.VkGlFramebuffer;
 import com.yuhan123.vulkanmod.gl.VkGlTexture;
 import com.yuhan123.vulkanmod.render.texture.ImageUploadHelper;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
@@ -116,6 +117,17 @@ public abstract class ImageUtil {
         // image has been submitted before reading it back.
         ImageUploadHelper.INSTANCE.flushUploads();
 
+        // Reading the swapchain image back is a *write* to it (the TRANSFER_SRC
+        // transition below), so the submit has to wait on the semaphore its
+        // acquire signalled - otherwise the presentation engine may still be
+        // reading that image. The splash screenshot path reads it while the
+        // frame that rendered it is still open, which is exactly the case.
+        long waitSemaphore = VK_NULL_HANDLE;
+        SwapChain swapChain = Renderer.getInstance().getSwapChain();
+        if (swapChain != null && image == swapChain.getColorAttachment()) {
+            waitSemaphore = Renderer.getInstance().takeCurrentAcquireSemaphore();
+        }
+
         try (MemoryStack stack = stackPush()) {
             int prevLayout = image.getCurrentLayout();
             CommandPool.CommandBuffer commandBuffer = DeviceManager.getGraphicsQueue().beginCommands();
@@ -133,7 +145,7 @@ public abstract class ImageUtil {
                               image.height, 0, 0, 0, 0, 0);
             image.transitionImageLayout(stack, commandBuffer.getHandle(), prevLayout);
 
-            long fence = DeviceManager.getGraphicsQueue().submitCommands(commandBuffer);
+            long fence = DeviceManager.getGraphicsQueue().submitCommands(commandBuffer, waitSemaphore);
             vkWaitForFences(DeviceManager.vkDevice, fence, true, VUtil.UINT64_MAX);
 
             MemoryManager.MapAndCopy(pStagingAllocation.get(0),
@@ -219,46 +231,6 @@ public abstract class ImageUtil {
         }
     }
 
-    /** TEMP DIAGNOSTIC (remove). */
-    private static int BG_DUMPED = 0;
-
-    /** TEMP DIAGNOSTIC (remove): dump the swapchain image of the current frame. */
-    public static void dumpMainTargetPng(String name) {
-        try {
-            SwapChain sc = Renderer.getInstance().getSwapChain();
-            if (sc == null) {
-                VulkanMod.LOGGER.warn("[VKPROF] main target dump skipped, no swapchain");
-                return;
-            }
-            dumpTexturePng(sc.getColorAttachment(), name);
-        } catch (Throwable t) {
-            VulkanMod.LOGGER.warn("[VKPROF] main target dump failed", t);
-        }
-    }
-
-    /** TEMP DIAGNOSTIC (remove): read an image back to host memory and save it as a PNG. */
-    private static void dumpTexturePng(VulkanImage image, String name) {
-        try {
-            java.nio.ByteBuffer tmp = org.lwjgl.system.MemoryUtil.memAlloc(image.width * image.height * 4);
-            downloadTexture(image, org.lwjgl.system.MemoryUtil.memAddress0(tmp));
-            java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(
-                    image.width, image.height, java.awt.image.BufferedImage.TYPE_INT_RGB);
-            for (int y = 0; y < image.height; y++) {
-                for (int x = 0; x < image.width; x++) {
-                    int i = (y * image.width + x) * 4;
-                    int r = tmp.get(i) & 0xFF, g = tmp.get(i + 1) & 0xFF, b = tmp.get(i + 2) & 0xFF;
-                    img.setRGB(x, y, (r << 16) | (g << 8) | b);
-                }
-            }
-            org.lwjgl.system.MemoryUtil.memFree(tmp);
-            javax.imageio.ImageIO.write(img, "PNG", new java.io.File(name));
-            VulkanMod.LOGGER.info("[VKPROF] dumped {} ({}x{}) -> {}", name, image.width, image.height,
-                    new java.io.File(name).getAbsolutePath());
-        } catch (Throwable t) {
-            VulkanMod.LOGGER.warn("[VKPROF] texture dump failed", t);
-        }
-    }
-
     /**
      * GL {@code glCopyTexSubImage2D} for the 1.12.2 main-menu panorama skybox.
      *
@@ -290,10 +262,14 @@ public abstract class ImageUtil {
         if (dstImage == null)
             return;
 
-        VulkanImage srcImage = null;
-        Framebuffer boundFramebuffer = Renderer.getInstance().getBoundFramebuffer();
-        if (boundFramebuffer != null)
-            srcImage = boundFramebuffer.getColorAttachment();
+        // GL semantics: glCopyTexSubImage2D reads from the currently bound READ
+        // framebuffer. That is VkGlFramebuffer's GL-level tracker, NOT Renderer's
+        // render-pass-level one - vanilla's renderSkybox unbinds the MC framebuffer
+        // before drawing the panorama, so "no GL framebuffer bound" means the
+        // default framebuffer, i.e. the swapchain. Reading Renderer's tracker here
+        // instead picks up the MC framebuffer, which still holds the previous
+        // frame's finished GUI, and the menu background goes flat.
+        VulkanImage srcImage = VkGlFramebuffer.getBoundColorAttachment();
         if (srcImage == null) {
             SwapChain swapChain = Renderer.getInstance().getSwapChain();
             if (swapChain != null) {
@@ -373,20 +349,13 @@ public abstract class ImageUtil {
                 .baseArrayLayer(0)
                 .layerCount(1);
 
+            // NEAREST, not LINEAR: LINEAR on this large down-scale blit produced a
+            // broken/partial result (left third drawn, right two-thirds blank) on
+            // the real swapchain. NEAREST is the proven path for this blit.
             vkCmdBlitImage(commandBuffer, srcImage.getId(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            dstImage.getId(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, blit, VK_FILTER_NEAREST);
 
             dstImage.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-            // TEMP DIAGNOSTIC (remove): dump what the blit actually wrote, plus
-            // the whole source framebuffer, at a steady-state copy.
-            if (BG_DUMPED >= 0 && BG_DUMPED < 100) {
-                BG_DUMPED++;
-                if (BG_DUMPED == 100) {
-                    dumpTexturePng(dstImage, "menu_bg_dump.png");
-                    dumpTexturePng(srcImage, "menu_swap_dump.png");
-                }
-            }
         } finally {
             // Resume the swapchain pass so the rest of drawScreen has somewhere
             // to draw even if the blit above threw.

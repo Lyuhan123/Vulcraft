@@ -2,6 +2,7 @@ package com.yuhan123.vulkanmod.mixin.texture;
 
 import com.google.common.hash.Hashing;
 import com.mojang.authlib.GameProfile;
+import com.yuhan123.vulkanmod.vulkan.VRenderSystem;
 import net.minecraft.client.ClientBrandRetriever;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GlStateManager;
@@ -412,6 +413,18 @@ public boolean GL_AMD_blend_minmax_factor;
         if (gameprofile != null && gameprofile.getId() != null) {
             p_70001_1_.addStatToSnooper("uuid", Hashing.sha1().hashBytes(gameprofile.getId().toString().getBytes(Charsets.ISO_8859_1)).toString());
         }
+    }
+
+    // Vulkan has a fixed device texture limit; the vanilla/Forge implementation
+    // of getGLMaximumTextureSize() routes through SplashProgress.getMaxTextureSize()
+    // which PROBES the limit with GL_PROXY_TEXTURE_2D + glGetTexLevelParameteri —
+    // a GL-only idiom this renderer cannot emulate (it crashes on the proxy
+    // target). Return the real device limit directly so every caller (Forge's
+    // TextureMap, JEI's JeiTextureMap, etc.) gets a correct answer without the
+    // GL probe path. TextureMapMixin's redirect becomes redundant but harmless.
+    @Overwrite
+    public static int getGLMaximumTextureSize() {
+        return VRenderSystem.maxSupportedTextureSize();
     }
 
 //    @ModifyArg(method = "addServerTypeToSnooper", at = @At(value = "INVOKE", target = "Lnet/minecraft/profiler/Snooper;addStatToSnooper(Ljava/lang/String;Ljava/lang/Object;)V"), index = 1)

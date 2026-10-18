@@ -143,6 +143,20 @@ public class VkGlFramebuffer {
         return boundFramebuffer;
     }
 
+    /**
+     * Colour attachment of the GL-level bound framebuffer, or {@code null} when
+     * the default framebuffer (the swapchain) is bound.
+     *
+     * <p>This is the authority for {@code glCopyTexSubImage2D} / {@code glReadPixels}:
+     * those read from the GL READ framebuffer binding, which is NOT the same thing as
+     * {@code Renderer}'s render-pass-level bound framebuffer. vanilla's
+     * {@code GuiMainMenu.renderSkybox} unbinds the MC framebuffer before drawing the
+     * panorama, so the copy must fall through to the swapchain.
+     */
+    public static VulkanImage getBoundColorAttachment() {
+        return boundFramebuffer == null ? null : boundFramebuffer.colorAttachment;
+    }
+
     public static VkGlFramebuffer getFramebuffer(int id) {
         return map.get(id);
     }

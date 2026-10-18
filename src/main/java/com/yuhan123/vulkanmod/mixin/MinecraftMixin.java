@@ -7,9 +7,21 @@ import com.yuhan123.vulkanmod.gl.VkGlFramebuffer;
 import com.yuhan123.vulkanmod.render.util.FrameProfiler;
 import com.yuhan123.vulkanmod.vulkan.Renderer;
 import com.yuhan123.vulkanmod.vulkan.Vulkan;
+import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.inventory.GuiInventory;
+import net.minecraft.entity.item.EntityItem;
+import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.init.Blocks;
+import net.minecraft.init.Items;
 import net.minecraft.profiler.Profiler;
+import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.world.WorldServer;
+import net.minecraftforge.fml.common.Loader;
+import net.minecraftforge.fml.common.ModContainer;
 
 import org.lwjgl.opengl.Display;
 import org.lwjgl.system.MemoryUtil;
@@ -48,6 +60,132 @@ public class MinecraftMixin {
     @Unique private static boolean sceneFrozen = false;
     @Unique private static boolean profileWindowStarted = false;
     @Unique private static final boolean BENCH_MODE = VulkanModConfig.getBool("AUTOJOIN", false);
+
+    /**
+     * Compatibility-test mode (COMPAT=1): a headless smoke test that drives
+     * vulcraft alongside other mods and captures a sequence of screenshots:
+     * world + JEI overlay, given items, open inventory, and a different
+     * dimension (the End, to prove vulcraft re-renders on a dimension switch).
+     * Reuses AUTOJOIN (loads "New World") and never pauses, exactly like bench
+     * mode, so the game reaches an in-world scene without manual input.
+     */
+    @Unique private static final boolean COMPAT_MODE = VulkanModConfig.getBool("COMPAT", false);
+
+    /** When the compatibility run entered the world (ms); drives the step sequence. */
+    @Unique private static long compatStart = 0;
+    @Unique private static boolean compatWorldShot = false;
+    @Unique private static boolean compatGive = false;
+    @Unique private static boolean compatItemsShot = false;
+    @Unique private static boolean compatInvOpen = false;
+    @Unique private static boolean compatInvShot = false;
+    @Unique private static boolean compatDim = false;
+    @Unique private static boolean compatQuit = false;
+
+    // Twilight Forest portal step (replaces the old End switch): build a real TF
+    // portal at the player's feet, drop a diamond in it so TF's own
+    // checkForPortalCreation (fired every player tick) forms the portal and
+    // teleports the player, and fall back to a direct changeDimension(7) if the
+    // portal has not formed within the poll window.
+    @Unique private static long compatTfBuildMs = 0;
+    @Unique private static boolean compatTfShot = false;
+    @Unique private static boolean compatTfFallback = false;
+    @Unique private static long compatTfFallbackMs = 0;
+    @Unique private static long compatTfArriveMs = 0;
+
+    // Whether Twilight Forest is actually loaded this run (gates the portal step,
+    // so the harness works as a generic smoke test for any mod set, not just TF).
+    @Unique private static boolean compatTfResolved = false;
+    @Unique private static boolean compatTfEnabled = false;
+    @Unique private static boolean compatModsLogged = false;
+    @Unique private static boolean compatJmEnabled = false;
+    @Unique private static boolean compatJmInvClosed = false;
+    @Unique private static boolean compatJmOpen = false;
+    @Unique private static boolean compatJmShot = false;
+    @Unique private static boolean compatJmClosed = false;
+
+    // Botania item-effect test (BOTANIA_TEST=1 + botania loaded): replaces the
+    // vanilla step sequence with give-items -> fire Mana Blaster -> place
+    // functional flowers -> hold Mana Tablet (HUD) + screenshots at each step.
+    @Unique private static final boolean BOTANIA_TEST =
+            VulkanModConfig.getBool("BOTANIA_TEST", false);
+    @Unique private static boolean compatBotaniaEnabled = false;
+    @Unique private static boolean botAimed = false;
+    @Unique private static boolean botArenaBuilt = false;
+    @Unique private static boolean botServerTp = false;
+    @Unique private static boolean botRefreshed = false;
+    @Unique private static boolean botRefreshed2 = false;
+    @Unique private static boolean botDesyncRecheck = false;
+    @Unique private static boolean botEarlyDump = false;
+    @Unique private static boolean botEntLog1 = false;
+    @Unique private static boolean botEntLog2 = false;
+    @Unique private static boolean botEntLog3 = false;
+    @Unique private static boolean botEntLog4 = false;
+    @Unique private static boolean botGave = false;
+    @Unique private static boolean botItemsShot = false;
+    @Unique private static boolean botGunHeld = false;
+    @Unique private static boolean botFired1 = false;
+    @Unique private static boolean botFired2 = false;
+    @Unique private static boolean botFired3 = false;
+    @Unique private static boolean botBurstShot = false;
+    @Unique private static boolean botBurstShot2 = false;
+    @Unique private static boolean botAimDown = false;
+    @Unique private static boolean botPlaced1 = false;
+    @Unique private static boolean botPlaced2 = false;
+    @Unique private static boolean botAimBack = false;
+    @Unique private static int botFx = 0;
+    @Unique private static int botFy = 0;
+    @Unique private static int botFz = 0;
+    @Unique private static boolean botFlowersShot = false;
+    @Unique private static boolean botTabletHeld = false;
+    @Unique private static boolean botHudShot = false;
+
+    // Tech-mod machine-GUI test (TECHGUI_TEST=1): for the first loaded tech mod,
+    // build a small platform, teleport the player next to a placed machine
+    // block, open its GUI on the SERVER thread (the real right-click path),
+    // capture techgui_<label>.png, then close the GUI and quit. Driven one mod
+    // per run (the harness selects it via -Pcompat_mods); the bot opens
+    // whichever machine block maps to the first loaded tech mod.
+    @Unique private static final boolean TECHGUI_TEST =
+            VulkanModConfig.getBool("TECHGUI_TEST", false);
+
+    // Render-fix regression test (FIXTEST=1 + AUTOJOIN=1): captures the F3
+    // direction axes (OpenGlHelper.renderDirections - the red/green/blue rays
+    // that used to render as wide filled triangles) and an end-portal block
+    // (TileEntityEndPortalRenderer - the texGen starfield that used to render
+    // untextured). One screenshot per target, then quit.
+    @Unique private static final boolean FIXTEST =
+            VulkanModConfig.getBool("FIXTEST", false);
+    @Unique private static boolean fixF3On = false;
+    @Unique private static boolean fixF3Shot = false;
+    @Unique private static boolean fixStageBuilt = false;
+    @Unique private static boolean fixPortalPlaced = false;
+    @Unique private static boolean fixPortalShot = false;
+    @Unique private static boolean fixQuit = false;
+
+    // Window-minimise regression test (MINITEST=1 + AUTOJOIN=1): iconify the
+    // GLFW window, keep the game loop running while it is minimised, restore
+    // it, and capture a screenshot before and after. Iconifying drops the
+    // framebuffer size to 0x0 on every platform, so the surface's
+    // currentExtent does too - this exercises the swapchain rebuild path that
+    // the "minimising sometimes crashes / leaves a black screen" report hits.
+    @Unique private static final boolean MINITEST =
+            VulkanModConfig.getBool("MINITEST", false);
+    @Unique private static boolean miniBeforeShot = false;
+    @Unique private static boolean miniIconified = false;
+    @Unique private static boolean miniRestored = false;
+    @Unique private static boolean miniAfterShot = false;
+    @Unique private static boolean miniQuit = false;
+    @Unique private static boolean compatTechGuiEnabled = false;
+    @Unique private static boolean techPlatformBuilt = false;
+    @Unique private static boolean techServerTp = false;
+    @Unique private static boolean techBlockPlaced = false;
+    @Unique private static boolean techGuiOpenRequested = false;
+    @Unique private static boolean techGuiOpened = false;
+    @Unique private static boolean techGuiShot = false;
+    @Unique private static boolean techGuiClosed = false;
+    @Unique private static String techTargetMod = "";
+    @Unique private static String techTargetBlock = "";
+    @Unique private static int techTargetMeta = 0;
 
     /**
      * How long after the bench window opens the profiler's accumulators are
@@ -636,6 +774,34 @@ public class MinecraftMixin {
     /** Viewpoint last applied, so PIN_CAMERA can re-apply the same one. */
     @Unique private static double[] pinnedViewpoint = null;
 
+    /**
+     * Force the CLIENT world time to a fixed tick every frame until the shot
+     * fires. Off (<0) by default.
+     *
+     * <p>Why this exists: /time set night through the integrated server does
+     * reach the server world (logged serverWorldTime=13000) but the client's
+     * own WorldClient stayed at 6000 (noon) for the entire run, so every
+     * "night" capture was actually rendered at noon with cloudColour
+     * (1,1,1) - i.e. it never tested the night path at all.
+     */
+    @Unique private static final long FORCE_CLIENT_TIME = vulkanmod$forceClientTime();
+
+    /** Render frames counted inside the bench window, for the FPS report. */
+    @Unique private static long benchFrames = 0;
+
+    @Unique
+    private static long vulkanmod$forceClientTime() {
+        final String v = VulkanModConfig.get("BENCH_CLIENT_TIME");
+        if (v == null || v.isBlank()) {
+            return -1L;
+        }
+        try {
+            return Long.parseLong(v.trim());
+        } catch (NumberFormatException e) {
+            return -1L;
+        }
+    }
+
     @Unique
     private static long vulkanmod$shotSeconds() {
         String seconds = VulkanModConfig.get("SHOT");
@@ -647,6 +813,20 @@ public class MinecraftMixin {
         } catch (NumberFormatException e) {
             return 0L;
         }
+    }
+
+    /**
+     * BENCH_TIME: the argument handed to {@code /time set} at the bench
+     * viewpoint. Vanilla accepts either a literal ("day", "night") or a tick
+     * count, so both work here. Defaults to "day".
+     */
+    @Unique
+    private static String vulkanmod$benchTimeCommand() {
+        final String t = VulkanModConfig.get("BENCH_TIME");
+        if (t == null || t.isBlank()) {
+            return "time set day";
+        }
+        return "time set " + t.trim();
     }
 
     @Unique
@@ -726,7 +906,7 @@ public class MinecraftMixin {
      */
     @Inject(method = "isGamePaused", at = @At("HEAD"), cancellable = true)
     public void benchNoPause(CallbackInfoReturnable<Boolean> cir) {
-        if (BENCH_MODE) {
+        if (BENCH_MODE || COMPAT_MODE || FIXTEST || MINITEST) {
             cir.setReturnValue(false);
         }
     }
@@ -744,6 +924,15 @@ public class MinecraftMixin {
         // lwjglx's Display.create() may clear the current GL context (the visible
         // window is Vulkan-only); restore the hidden GL context on this thread.
         Vulkan.ensureHiddenGLContext();
+
+        // lwjglx's Display.create() ran GL.createCapabilities() against the
+        // hidden context (see preCreateDisplay), so the main thread now owns
+        // the only GLCapabilities instance that will ever exist. Stash them:
+        // the splash thread has no GL context, and loading-screen mods
+        // (CustomLoadingScreen) call GLContext.getCapabilities() from there -
+        // lwjglx would otherwise build its ContextCapabilities singleton on
+        // that thread and die with an ExceptionInInitializerError.
+        Vulkan.stashHiddenContextCaps();
 
         Vulkan.initVulkan(Display.getWindow());
         VulkanMod.LOGGER.info("Mixin succeed!" + Display.getWindow());
@@ -845,8 +1034,22 @@ public class MinecraftMixin {
                         // ("Couldn't process command: time set day"). Queued onto
                         // the server thread for the same reason as freezeScene.
                         final MinecraftServer server = mc.getIntegratedServer();
-                        server.addScheduledTask(() -> server.getCommandManager()
-                                .executeCommand(server, "time set day"));
+                        // BENCH_TIME overrides the hardcoded daytime so a run
+                        // can be aimed at night (cloud/sky/lightmap bugs are
+                        // only visible after dark). Defaults to "day" so every
+                        // earlier capture keeps its meaning.
+                        final String timeCmd = vulkanmod$benchTimeCommand();
+                        server.addScheduledTask(() -> {
+                            try {
+                                final int tr = server.getCommandManager().executeCommand(server, timeCmd);
+                                com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(
+                                        "[VKPROF] BENCHTIME cmd='{}' result={} serverWorldTime={}",
+                                        timeCmd, tr, server.worlds[0].getWorldTime());
+                            } catch (Throwable t) {
+                                com.yuhan123.vulkanmod.VulkanMod.LOGGER.error(
+                                        "[VKPROF] BENCHTIME cmd='{}' FAILED", timeCmd, t);
+                            }
+                        });
                     } else {
                         mc.world.setWorldTime(6000L);
                     }
@@ -906,6 +1109,10 @@ public class MinecraftMixin {
             if (autoQuitStart == 0) {
                 autoQuitStart = System.currentTimeMillis();
             } else {
+                // Bench frame counter. FPS is render frames over wall time and
+                // nothing in the harness reports it - VKProf.info is a no-op
+                // body, so the number has to go through VulkanMod.LOGGER.
+                benchFrames++;
                 // See PIN_CAMERA: hold the viewpoint still so the shot is a
                 // function of the render path and nothing else.
                 if (PIN_CAMERA && !screenshotFired && pinnedViewpoint != null && mc.player != null) {
@@ -913,6 +1120,12 @@ public class MinecraftMixin {
                             pinnedViewpoint[2], (float) pinnedViewpoint[3], (float) pinnedViewpoint[4]);
                     mc.player.setPositionAndUpdate(pinnedViewpoint[0], pinnedViewpoint[1],
                             pinnedViewpoint[2]);
+                }
+
+                // Hold the CLIENT world time too - see FORCE_CLIENT_TIME. The
+                // server-side /time set alone leaves the client at noon.
+                if (FORCE_CLIENT_TIME >= 0 && mc.world != null && !screenshotFired) {
+                    mc.world.setWorldTime(FORCE_CLIENT_TIME);
                 }
 
                 if (SHOT_SECONDS > 0 && !screenshotFired
@@ -938,6 +1151,14 @@ public class MinecraftMixin {
                     if (PROFILE_DUMP) {
                         dumpProfiler(mc);
                     }
+                    final long benchMs = System.currentTimeMillis() - autoQuitStart;
+                    final double fps = benchFrames * 1000.0 / Math.max(1L, benchMs);
+                    com.yuhan123.vulkanmod.VulkanMod.LOGGER.info(
+                            "[VKPROF] BENCH fps={} frames={} ms={} (TERRAIN_BATCH={} REGION={} AREA={})",
+                            String.format("%.1f", fps), Long.valueOf(benchFrames), Long.valueOf(benchMs),
+                            Boolean.valueOf(VulkanModConfig.getBool("TERRAIN_BATCH", false)),
+                            Boolean.valueOf(VulkanModConfig.getBool("TERRAIN_REGION", false)),
+                            Boolean.valueOf(VulkanModConfig.getBool("TERRAIN_AREA", false)));
                     VKProf.info("[VKPROF] auto-quit after {}s in world", BENCH_MILLIS / 1000L);
                     mc.shutdown();
                 }
@@ -948,6 +1169,12 @@ public class MinecraftMixin {
         // frame's draws. Without this the Drawer's usedBytes accumulates across
         // frames, so the buffers double in size every frame until the GPU runs
         // out of memory (VK_ERROR_OUT_OF_DEVICE_MEMORY) and the game stalls.
+        // Compatibility-test sequence: drive the game alongside other mods and
+        // capture a series of screenshots proving vulcraft renders them.
+        if (COMPAT_MODE || FIXTEST || MINITEST) {
+            vulkanmod$compatTick(mc);
+        }
+
         Renderer.getInstance().preInitFrame();
 
         Renderer.getInstance().beginFrame();
@@ -966,5 +1193,1360 @@ public class MinecraftMixin {
     @Inject(method = "runTick", at = @At("RETURN"))
     public void benchTickEnd(CallbackInfo ci) {
         FrameProfiler.endGameTick();
+    }
+
+    /**
+     * Compatibility-test step sequence. Each step fires once, timed from when the
+     * player first enters the world. The screenshots are written to
+     * screenshots/vulkanmod-<tag>.png and analysed off-line (the model cannot
+     * view them) for: JEI overlay present, inventory GUI rendered, items visible
+     * in the hotbar, and the End dimension rendered after a dimension switch.
+     */
+    @Unique
+    private static void vulkanmod$compatTick(Minecraft mc) {
+        // Only block while we are NOT in a world yet (player/server null). Do NOT
+        // block on currentScreen != null: step 3 deliberately opens the inventory
+        // GUI, and returning early there would freeze the whole sequence (the
+        // inventory-open flag is set but the later timed steps never fire).
+        if (mc.player == null || mc.getIntegratedServer() == null) {
+            return;
+        }
+        if (compatStart == 0) {
+            compatStart = System.currentTimeMillis();
+            VulkanMod.LOGGER.info("[VKPROF] compat: entered world, starting sequence");
+        }
+        if (!compatTfResolved) {
+            compatTfResolved = true;
+            compatTfEnabled = Loader.isModLoaded("twilightforest");
+            VulkanMod.LOGGER.info("[VKPROF] compat: twilightforest loaded = {}", compatTfEnabled);
+            compatJmEnabled = Loader.isModLoaded("journeymap");
+            VulkanMod.LOGGER.info("[VKPROF] compat: journeymap loaded = {}", compatJmEnabled);
+            compatBotaniaEnabled = BOTANIA_TEST && Loader.isModLoaded("botania");
+            VulkanMod.LOGGER.info("[VKPROF] compat: botania item-test mode = {}", compatBotaniaEnabled);
+        }
+        if (!compatModsLogged) {
+            compatModsLogged = true;
+            try {
+                final StringBuilder sb = new StringBuilder();
+                for (ModContainer m : Loader.instance().getActiveModList()) {
+                    sb.append(m.getModId()).append(':').append(m.getVersion()).append(' ');
+                }
+                VulkanMod.LOGGER.info("[VKPROF] compat: loaded mods ({}): {}",
+                        Loader.instance().getActiveModList().size(), sb.toString().trim());
+            } catch (Throwable t) {
+                VulkanMod.LOGGER.warn("[VKPROF] compat: could not enumerate mods", t);
+            }
+        }
+        final long dt = System.currentTimeMillis() - compatStart;
+
+        // Botania item-effect test takes over the whole sequence when enabled.
+        if (compatBotaniaEnabled) {
+            vulkanmod$botaniaTick(mc, dt);
+            return;
+        }
+
+        // Tech-mod machine-GUI test takes over when enabled (and not botania).
+        if (TECHGUI_TEST) {
+            vulkanmod$techGuiTick(mc, dt);
+            return;
+        }
+
+        // Render-fix regression test (FIXTEST=1, needs AUTOJOIN=1): F3 direction
+        // axes + an end portal block on a stage, one screenshot each.
+        if (FIXTEST) {
+            vulcraft$fixTick(mc, dt);
+            return;
+        }
+
+        // Window-minimise regression test (MINITEST=1, needs AUTOJOIN=1).
+        if (MINITEST) {
+            vulcraft$miniTick(mc, dt);
+            return;
+        }
+
+        // Step 1: world + JEI overlay (JEI draws its item list at the screen edge).
+        if (!compatWorldShot && dt > 4000) {
+            compatWorldShot = true;
+            vulkanmod$captureTo(mc, "compat_world");
+        }
+
+        // Step 2: give a spread of items, then screenshot the hotbar (item rendering).
+        if (!compatGive && dt > 8000) {
+            compatGive = true;
+            vulkanmod$giveCompatItems(mc);
+        }
+        if (!compatItemsShot && compatGive && dt > 10000) {
+            compatItemsShot = true;
+            vulkanmod$captureTo(mc, "compat_items");
+        }
+
+        // Step 3: force-open the inventory (JEI overlay + inventory GUI rendering).
+        if (!compatInvOpen && dt > 12000) {
+            compatInvOpen = true;
+            mc.displayGuiScreen(new GuiInventory(mc.player));
+        }
+        if (!compatInvShot && compatInvOpen && dt > 14000) {
+            compatInvShot = true;
+            vulkanmod$captureTo(mc, "compat_inv");
+        }
+
+        // Step 3b: JourneyMap fullscreen map (only when journeymap is loaded).
+        // JM 6.x dispatches keybinds via KeybindingHandler.consume() ->
+        // while (keyBinding.isPressed()) wrapper.action().run(); invoke the
+        // fullscreen-toggle action directly. JM is runtime-only here
+        // (modRuntimeOnly), so this must be pure reflection.
+        if (compatJmEnabled) {
+            if (!compatJmInvClosed && dt > 15000) {
+                compatJmInvClosed = true;
+                if (mc.currentScreen != null) {
+                    mc.displayGuiScreen(null);
+                }
+            }
+            if (!compatJmOpen && compatJmInvClosed && dt > 15600) {
+                compatJmOpen = true;
+                boolean opened = vulkanmod$openJourneyMapFullscreen(mc);
+                VulkanMod.LOGGER.info("[VKPROF] compat: journeymap fullscreen map opened={} screen={}",
+                        opened, mc.currentScreen == null ? "null" : mc.currentScreen.getClass().getName());
+            }
+            if (!compatJmShot && compatJmOpen && dt > 21000) {
+                compatJmShot = true;
+                vulkanmod$captureTo(mc, "compat_jm");
+            }
+            if (!compatJmClosed && compatJmShot && dt > 21600) {
+                compatJmClosed = true;
+                if (mc.currentScreen != null) {
+                    mc.displayGuiScreen(null);
+                }
+            }
+        }
+
+        // Step 4: enter the Twilight Forest dimension through a real TF portal.
+        // Build a 2x2 water pool with a grass rim + flowers at the player's
+        // feet, stand the player in it, drop a diamond so TF's own
+        // checkForPortalCreation (fired every player tick) forms the portal and
+        // teleports the player. If the portal has not formed within the poll
+        // window, fall back to a direct changeDimension(7) (TF's default id).
+        // Only when Twilight Forest is actually loaded (generic smoke test otherwise).
+        if (compatTfEnabled && !compatDim && dt > 16000) {
+            compatDim = true;
+            if (mc.currentScreen != null) {
+                mc.displayGuiScreen(null);
+            }
+            compatTfBuildMs = System.currentTimeMillis();
+            vulkanmod$buildTFPortal(mc);
+        }
+        if (compatDim && !compatTfShot) {
+            final long ttf = System.currentTimeMillis() - compatTfBuildMs;
+            final boolean inTf = vulkanmod$isInTwilightForest(mc);
+            if (inTf) {
+                if (compatTfArriveMs == 0) {
+                    compatTfArriveMs = System.currentTimeMillis();
+                    VulkanMod.LOGGER.info("[VKPROF] compat: entered Twilight Forest via {}",
+                            compatTfFallback ? "direct changeDimension fallback" : "auto portal");
+                }
+                if (System.currentTimeMillis() - compatTfArriveMs > 3000L) {
+                    compatTfShot = true;
+                    vulkanmod$captureTo(mc, "compat_tf");
+                }
+            } else if (ttf > 12000L && !compatTfFallback) {
+                compatTfFallback = true;
+                compatTfFallbackMs = System.currentTimeMillis();
+                VulkanMod.LOGGER.warn("[VKPROF] compat: auto TF portal did not form in 12s, falling back to changeDimension(7)");
+                vulkanmod$changeDimensionTf(mc);
+            }
+        }
+
+        // Step 5: done. Quit earlier when there is no TF portal step to wait for.
+        final long compatQuitMs = compatBotaniaEnabled ? 22000L
+                : (compatTfEnabled ? 34000L : (compatJmEnabled ? 24000L : 18000L));
+        if (!compatQuit && dt > compatQuitMs) {
+            compatQuit = true;
+            VulkanMod.LOGGER.info("[VKPROF] compat: sequence complete, quitting");
+            mc.shutdown();
+        }
+    }
+
+    /**
+     * Opens JourneyMap's fullscreen map directly. JM classes are runtime-only
+     * (modRuntimeOnly), so this is pure reflection. Verified against
+     * journeymap 1.12.2-6.0.10: UIManager.open(Fullscreen.class) goes through
+     * Fullscreen.reset(), which pops the About splash dialog on top of the
+     * map; constructing Fullscreen and displaying it directly skips the splash.
+     */
+    @Unique
+    private static boolean vulkanmod$openJourneyMapFullscreen(Minecraft mc) {
+        try {
+            Class<?> fsClass = Class.forName("journeymap.client.ui.fullscreen.Fullscreen");
+            Object screen = fsClass.getDeclaredConstructor().newInstance();
+            if (!(screen instanceof net.minecraft.client.gui.GuiScreen)) {
+                return false;
+            }
+            mc.displayGuiScreen((net.minecraft.client.gui.GuiScreen) screen);
+            return true;
+        } catch (Throwable t) {
+            VulkanMod.LOGGER.warn("[VKPROF] compat: journeymap fullscreen map open failed", t);
+            return false;
+        }
+    }
+
+    /** Writes screenshots/vulkanmod-<tag>.png (same mechanism as takeScreenshot). */
+    @Unique
+    private static void vulkanmod$captureTo(Minecraft mc, String tag) {
+        final int width = mc.displayWidth;
+        final int height = mc.displayHeight;
+        if (width <= 0 || height <= 0) {
+            VKProf.warn("[VKPROF] compat capture '{}' skipped, zero-sized framebuffer", tag);
+            return;
+        }
+        ByteBuffer pixels = MemoryUtil.memAlloc(width * height * 4);
+        try {
+            VkGlFramebuffer.readPixels(0, 0, width, height, pixels);
+            BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+            long sum = 0L;
+            for (int y = 0; y < height; ++y) {
+                final int srcRow = (height - 1 - y) * width * 4;
+                for (int x = 0; x < width; ++x) {
+                    final int i = srcRow + x * 4;
+                    final int r = pixels.get(i) & 0xFF;
+                    final int g = pixels.get(i + 1) & 0xFF;
+                    final int b = pixels.get(i + 2) & 0xFF;
+                    image.setRGB(x, y, (r << 16) | (g << 8) | b);
+                    sum += r + g + b;
+                }
+            }
+            File dir = new File(System.getProperty("user.dir", "."), "screenshots");
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                throw new IOException("cannot create " + dir);
+            }
+            File out = new File(dir, "vulkanmod-" + tag + ".png");
+            ImageIO.write(image, "PNG", out);
+            VKProf.info("[VKPROF] compat capture '{}' {}x{} meanRGB={} -> {}",
+                    tag, width, height,
+                    String.format("%.1f", sum / (double) (width * height * 3)),
+                    out.getAbsolutePath());
+        } catch (Throwable t) {
+            VulkanMod.LOGGER.error("[VKPROF] compat capture '{}' failed", tag, t);
+        } finally {
+            MemoryUtil.memFree(pixels);
+        }
+    }
+
+    /**
+     * Botania item-effect test sequence (BOTANIA_TEST=1). Timeline from world
+     * entry: build a floating arena -> give items -> hotbar shot -> fire the
+     * Mana Blaster x3 through the vanilla input path (KeyBinding.onTick ->
+     * processKeyBinds -> rightClickMouse) -> burst shots -> /setblock functional
+     * flowers + mana spreader on the arena -> flowers shot -> hold the Mana
+     * Tablet -> mana-bar HUD shot. Quit at 22s (see compatQuitMs).
+     *
+     * <p>Why the arena: the AUTOJOIN teleport target is (0.5, 72, 0.5), which
+     * sits INSIDE a stone structure in the fixed-seed world - the wall fills
+     * the right half of the frame and the unlit interior the rest, so every
+     * capture from there is a dark stone wall with no terrain and no
+     * difference between shots. The arena is a grass platform 28 blocks above
+     * the structure: open sky above, the generated spawn terrain (already
+     * loaded, renderDistance 12) below and around it, and the flowers have
+     * valid grass support (BlockBush.canSustainBush accepts only
+     * grass/dirt/farmland - a stone pad makes them pop).
+     */
+    @Unique
+    private static void vulkanmod$botaniaTick(Minecraft mc, long dt) {
+        // Aim at the horizon facing +Z (yaw 0) so the burst and the flowers
+        // placed in front of the player are actually inside the camera frustum.
+        if (!botAimed) {
+            botAimed = true;
+            mc.player.rotationYaw = 0.0F;
+            mc.player.rotationPitch = 0.0F;
+        }
+
+        // Arena: carve air y=100..112 and lay grass at y=99 over +-14 blocks
+        // around the spawn column. Queued on the server thread - the teleport
+        // below runs a full second later so the platform exists before the
+        // player is moved onto it (falling 28 blocks into the structure would
+        // kill them).
+        if (!botArenaBuilt && dt > 500) {
+            botArenaBuilt = true;
+            vulkanmod$runServerCommands(mc, new String[]{
+                    "fill -14 100 -14 14 112 14 minecraft:air",
+                    "fill -14 99 -14 14 99 14 minecraft:grass",
+            });
+            VulkanMod.LOGGER.info("[VKPROF] botania: arena commands queued (grass at y=99)");
+        }
+        // Teleport. THE SERVER PLAYER, not just the client: a client-only
+        // setPositionAndUpdate leaves the server-side EntityPlayerMP at the
+        // world spawn (-192, 64, 96 in this seed - an ocean), 215 blocks from
+        // the arena. Everything server-authoritative then happens at the spawn:
+        // the Mana Blaster's EntityManaBurst spawns at the SERVER player's eye
+        // (EntityManaBurst(EntityPlayer, EnumHand) ctor -> player.posY +
+        // getEyeHeight), so the projectile flew over the ocean 215 blocks away
+        // and never entered a single capture, and block updates for the arena
+        // were queued into PlayerChunkMap entries at the very edge of the
+        // server view distance (12 chunks) and partly dropped - which is why
+        // the client was missing the whole east half of the arena floor
+        // (x>=0) and both functional flowers.
+        //
+        // setPlayerLocation is the server-authoritative teleport: it moves the
+        // EntityPlayerMP AND sends SPacketPlayerPosLook, which drags the client
+        // player along with it. On the arena the server player stands on solid
+        // grass, so the client's fall-position packets can no longer push it
+        // off the edge and kill it (fall damage -> respawn at the spawn point
+        // was the loop that kept re-scattering the server player).
+        if (botArenaBuilt && !botServerTp && dt > 1200) {
+            botServerTp = true;
+            final net.minecraft.server.MinecraftServer server0 = mc.getIntegratedServer();
+            if (server0 != null) {
+                server0.addScheduledTask(() -> {
+                    try {
+                        final java.util.List<net.minecraft.entity.player.EntityPlayerMP> players =
+                                server0.getPlayerList().getPlayers();
+                        if (!players.isEmpty()) {
+                            final net.minecraft.entity.player.EntityPlayerMP mp = players.get(0);
+                            VulkanMod.LOGGER.info(
+                                    "[VKPROF] botania: server player BEFORE tp = ({}, {}, {})",
+                                    String.format(java.util.Locale.ROOT, "%.1f", mp.posX),
+                                    String.format(java.util.Locale.ROOT, "%.1f", mp.posY),
+                                    String.format(java.util.Locale.ROOT, "%.1f", mp.posZ));
+                            mp.connection.setPlayerLocation(0.5, 100.0, 0.5, 0.0F, 0.0F);
+                            VulkanMod.LOGGER.info(
+                                    "[VKPROF] botania: server player AFTER tp = ({}, {}, {})",
+                                    String.format(java.util.Locale.ROOT, "%.1f", mp.posX),
+                                    String.format(java.util.Locale.ROOT, "%.1f", mp.posY),
+                                    String.format(java.util.Locale.ROOT, "%.1f", mp.posZ));
+                        }
+                    } catch (Throwable t) {
+                        VulkanMod.LOGGER.warn("[VKPROF] botania: server teleport FAILED", t);
+                    }
+                });
+            }
+            // Client-side too, so the camera moves on this very frame.
+            mc.player.setLocationAndAngles(0.5, 100.0, 0.5, 0.0F, 0.0F);
+            mc.player.setPositionAndUpdate(0.5, 100.0, 0.5);
+            VulkanMod.LOGGER.info("[VKPROF] botania: server-authoritative teleport queued (0.5,100,0.5)");
+        }
+        // Force the arena floor back onto the client. The original fill's block
+        // updates for the chunks at the edge of the server view distance never
+        // all arrived, so the client is missing x>=0 of the grass layer (135+
+        // blocks, exactly where the player stands and where the flowers go).
+        // Re-setting the SAME block is a no-op (setblock/fill return 0 and send
+        // no packet), so the floor is toggled grass -> dirt -> grass: every
+        // position then differs from the server state and a real
+        // SPacketBlockChange goes out. The flowers are not placed yet, and
+        // dirt supports bushes, so nothing pops.
+        if (botServerTp && !botRefreshed && dt > 1800) {
+            botRefreshed = true;
+            vulkanmod$runServerCommands(mc, new String[]{
+                    "fill -14 99 -14 14 99 14 minecraft:dirt",
+                    "fill -14 99 -14 14 99 14 minecraft:grass",
+            });
+            VulkanMod.LOGGER.info("[VKPROF] botania: arena floor force-refresh queued (dirt->grass)");
+        }
+
+        if (!botGave && dt > 2000) {
+            botGave = true;
+            vulkanmod$runServerCommands(mc, new String[]{
+                    "give @p botania:manaGun",
+                    "give @p botania:manaTablet 1 0 {mana:1000000}",
+                    "give @p botania:lens 1 0",
+                    "give @p botania:manasteelSword",
+                    "give @p botania:manasteelPick",
+                    "give @p botania:manaResource 8 0",
+                    "give @p botania:manaRing",
+                    "give @p botania:dirtRod",
+                    "give @p botania:terraformRod",
+                    "give @p botania:petal 16 0",
+                    // functional flowers are ONE block (specialFlower) with the
+                    // type in NBT - placing them as items goes through the real
+                    // onItemUse path (setblock cannot write the NBT type).
+                    "give @p botania:specialFlower 1 0 {type:\"puredaisy\"}",
+                    "give @p botania:specialFlower 1 0 {type:\"endoflame\"}",
+                    "give @p botania:spreader",
+            });
+            VulkanMod.LOGGER.info("[VKPROF] botania: test items given");
+        }
+        if (!botItemsShot && dt > 4500) {
+            botItemsShot = true;
+            vulkanmod$captureTo(mc, "compat_bot_items");
+        }
+
+        // Hold the Mana Blaster (pulls mana from the full tablet in the
+        // inventory) and right-click three times, 500 ms apart.
+        if (!botGunHeld && dt > 5000) {
+            botGunHeld = true;
+            final boolean held = vulkanmod$holdItem(mc, "botania:manaGun");
+            VulkanMod.LOGGER.info("[VKPROF] botania: mana blaster held={}", held);
+        }
+        if (botGunHeld && !botFired1 && dt > 5200) {
+            botFired1 = true;
+            KeyBinding.onTick(mc.gameSettings.keyBindUseItem.getKeyCode());
+        }
+        if (botFired1 && !botFired2 && dt > 5700) {
+            botFired2 = true;
+            KeyBinding.onTick(mc.gameSettings.keyBindUseItem.getKeyCode());
+        }
+        if (botFired2 && !botFired3 && dt > 6200) {
+            botFired3 = true;
+            KeyBinding.onTick(mc.gameSettings.keyBindUseItem.getKeyCode());
+            // Proof of firing: the gun drains the inventory tablet's mana.
+            for (int i = 0; i < mc.player.inventory.mainInventory.size(); i++) {
+                final net.minecraft.item.ItemStack st = mc.player.inventory.mainInventory.get(i);
+                if (!st.isEmpty() && "botania:manatablet".equalsIgnoreCase(
+                        net.minecraft.item.Item.REGISTRY.getNameForObject(st.getItem()).toString())) {
+                    VulkanMod.LOGGER.info("[VKPROF] botania: tablet mana after 3 shots = {}",
+                            st.hasTagCompound() ? st.getTagCompound().getInteger("mana") : -1);
+                }
+            }
+        }
+        // Track the mana-burst entity itself: the projectile never shows up in
+        // the captures, so log the client entity list at several delays to see
+        // whether it exists client-side (render issue) or is already gone.
+        if (botGunHeld && !botEntLog1 && dt > 5250) {
+            botEntLog1 = true;
+            vulkanmod$logEntities(mc, "t+50ms");
+        }
+        if (botEntLog1 && !botEntLog2 && dt > 5350) {
+            botEntLog2 = true;
+            vulkanmod$logEntities(mc, "t+150ms");
+        }
+        if (botEntLog2 && !botEntLog3 && dt > 5500) {
+            botEntLog3 = true;
+            vulkanmod$logEntities(mc, "t+300ms");
+        }
+        if (botEntLog3 && !botEntLog4 && dt > 6200) {
+            botEntLog4 = true;
+            vulkanmod$logEntities(mc, "t+1000ms");
+        }
+        // Burst shot ~400 ms after the first shot: at t+100 ms the burst is
+        // still ~0.2 blocks from the eye (inside the near plane); at t+400 ms
+        // it is a couple of blocks out, big and unmistakable, still over the
+        // platform (it only moves ~0.2 blocks/tick).
+        if (!botBurstShot && dt > 5600) {
+            botBurstShot = true;
+            vulkanmod$captureTo(mc, "compat_bot_burst");
+        }
+        if (!botBurstShot2 && dt > 7000) {
+            botBurstShot2 = true;
+            vulkanmod$captureTo(mc, "compat_bot_burst2");
+        }
+
+        // Early desync dump: BEFORE any flower is placed. If the grass hole is
+        // already here it came from the arena fill/teleport, not the flowers.
+        if (!botEarlyDump && dt > 7000) {
+            botEarlyDump = true;
+            vulkanmod$desyncDump(mc, "pre-flower");
+        }
+
+        // Functional flowers + a mana spreader on the arena, 4 blocks in front
+        // of the player (far enough that the camera at pitch 20 sees them
+        // against the terrain beyond the platform edge). The functional
+        // flowers are ONE block (specialFlower) with the subtile name in the TE
+        // NBT - setblock creates the block, blockdata writes subTileName
+        // (readPacketNBT -> provideSubTile instantiates it). The arena floor is
+        // grass, so canSustainBush is satisfied and the flowers survive; the
+        // blockdata runs in a separate tick from the setblock (the TE is not
+        // always visible to the command in the same tick). Tests block models,
+        // the spreader's animated rotation, the Pure Daisy's sparkle particles,
+        // Endoflame's flame.
+        if (!botAimDown && dt > 7500) {
+            botAimDown = true;
+            final int px = MathHelper.floor(mc.player.posX);
+            final int py = MathHelper.floor(mc.player.posY);
+            final int pz = MathHelper.floor(mc.player.posZ);
+            botFx = px;
+            botFy = py;
+            botFz = pz + 4;
+            VulkanMod.LOGGER.info("[VKPROF] botania: player at {},{},{} -> flower row at {},{},{}",
+                    px, py, pz, botFx, botFy, botFz);
+            vulkanmod$runServerCommands(mc, new String[]{
+                    "setblock " + (botFx - 1) + " " + botFy + " " + botFz + " botania:spreader",
+            });
+            mc.player.rotationPitch = 20.0F;
+            mc.player.rotationYaw = 0.0F;
+        }
+        if (botAimDown && !botPlaced1 && dt > 8200) {
+            botPlaced1 = true;
+            vulkanmod$runServerCommands(mc, new String[]{
+                    "setblock " + botFx + " " + botFy + " " + botFz + " botania:specialFlower",
+                    "setblock " + (botFx + 1) + " " + botFy + " " + botFz + " botania:specialFlower",
+            });
+        }
+        if (botPlaced1 && !botPlaced2 && dt > 8800) {
+            botPlaced2 = true;
+            vulkanmod$runServerCommands(mc, new String[]{
+                    "blockdata " + botFx + " " + botFy + " " + botFz + " {subTileName:\"puredaisy\"}",
+                    "blockdata " + (botFx + 1) + " " + botFy + " " + botFz + " {subTileName:\"endoflame\"}",
+            });
+        }
+        if (!botAimBack && dt > 10000) {
+            botAimBack = true;
+            vulkanmod$desyncDump(mc, "post-flower");
+        }
+        // Second force-refresh after the flowers are down: this one is the
+        // proof run - if the client still shows air at the flower row here,
+        // the updates are being dropped somewhere else (a second toggle sends
+        // 1682 real block-change packets through the same path).
+        if (botPlaced2 && !botRefreshed2 && dt > 10500) {
+            botRefreshed2 = true;
+            vulkanmod$runServerCommands(mc, new String[]{
+                    "fill -14 99 -14 14 99 14 minecraft:dirt",
+                    "fill -14 99 -14 14 99 14 minecraft:grass",
+            });
+        }
+        if (botAimBack && !botDesyncRecheck && dt > 16000) {
+            botDesyncRecheck = true;
+            vulkanmod$desyncDump(mc, "final");
+        }
+        if (!botFlowersShot && dt > 11000) {
+            botFlowersShot = true;
+            vulkanmod$captureTo(mc, "compat_bot_flowers");
+        }
+
+        // Hold the Mana Tablet -> Botania's mana bar HUD overlay.
+        if (!botTabletHeld && dt > 12000) {
+            botTabletHeld = true;
+            final boolean held = vulkanmod$holdItem(mc, "botania:manaTablet");
+            VulkanMod.LOGGER.info("[VKPROF] botania: mana tablet held={}", held);
+        }
+        if (!botHudShot && dt > 14000) {
+            botHudShot = true;
+            vulkanmod$captureTo(mc, "compat_bot_hud");
+        }
+    }
+
+    /**
+     * Logs every loaded client entity (class + position) except the player.
+     * Used to track the mana-burst projectile, which never appears in the
+     * captures: if the entity is absent here it never existed client-side,
+     * if it is present the problem is in the render path. Also logs the
+     * SERVER player's position - the burst spawns at the server player's eye,
+     * so if that is 200 blocks from the camera the projectile is simply
+     * somewhere else entirely.
+     */
+    @Unique
+    private static void vulkanmod$logEntities(Minecraft mc, String tag) {
+        if (mc.world == null) {
+            return;
+        }
+        String srvPos = "no-server";
+        if (mc.getIntegratedServer() != null) {
+            final java.util.List<net.minecraft.entity.player.EntityPlayerMP> players =
+                    mc.getIntegratedServer().getPlayerList().getPlayers();
+            if (!players.isEmpty()) {
+                final net.minecraft.entity.Entity mp = players.get(0);
+                srvPos = String.format(java.util.Locale.ROOT, "(%.1f,%.1f,%.1f)", mp.posX, mp.posY, mp.posZ);
+            }
+        }
+        final StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < mc.world.loadedEntityList.size(); i++) {
+            final net.minecraft.entity.Entity ent = mc.world.loadedEntityList.get(i);
+            if (ent == mc.player) {
+                continue;
+            }
+            sb.append(ent.getClass().getSimpleName())
+              .append(String.format(java.util.Locale.ROOT, "(%.1f,%.1f,%.1f)",
+                      ent.posX, ent.posY, ent.posZ));
+            // Class-NAME check, not a type reference: Botania is injected at
+            // runtime only and is not on the compile classpath.
+            if ("vazkii.botania.common.entity.EntityManaBurst".equals(ent.getClass().getName())) {
+                sb.append(String.format(java.util.Locale.ROOT,
+                        "[motion=(%.3f,%.3f,%.3f) age=%d dead=%s]",
+                        ent.motionX, ent.motionY, ent.motionZ, ent.ticksExisted, ent.isDead));
+            }
+            sb.append(' ');
+        }
+        VulkanMod.LOGGER.info("[VKPROF] botania: entities@{} n={} clientPlayer=({},{},{}) serverPlayer={}: {}",
+                tag, mc.world.loadedEntityList.size() - 1,
+                String.format(java.util.Locale.ROOT, "%.1f", mc.player.posX),
+                String.format(java.util.Locale.ROOT, "%.1f", mc.player.posY),
+                String.format(java.util.Locale.ROOT, "%.1f", mc.player.posZ),
+                srvPos, sb.toString().trim());
+    }
+
+    /**
+     * Client-vs-server block-state diff over the flower neighbourhood. The
+     * server keeps every block while the client is missing a 4x5 grass slab
+     * plus the two flowers, so map the exact shape of the desync at several
+     * points in the timeline.
+     */
+    @Unique
+    private static void vulkanmod$desyncDump(Minecraft mc, String tag) {
+        if (mc.world == null || mc.getIntegratedServer() == null) {
+            return;
+        }
+        final net.minecraft.world.WorldServer srv = mc.getIntegratedServer().worlds[0];
+        int diffs = 0;
+        final StringBuilder sb = new StringBuilder();
+        for (int y = 98; y <= 100; y++) {
+            for (int x = -6; x <= 8; x++) {
+                for (int z = -2; z <= 12; z++) {
+                    final net.minecraft.util.math.BlockPos pos =
+                            new net.minecraft.util.math.BlockPos(x, y, z);
+                    final Object cli = net.minecraft.block.Block.REGISTRY.getNameForObject(
+                            mc.world.getBlockState(pos).getBlock());
+                    final Object srvB = net.minecraft.block.Block.REGISTRY.getNameForObject(
+                            srv.getBlockState(pos).getBlock());
+                    if (!String.valueOf(cli).equals(String.valueOf(srvB))) {
+                        diffs++;
+                        if (diffs <= 40) {
+                            sb.append('[').append(x).append(',').append(y).append(',').append(z)
+                              .append(" c=").append(cli).append(" s=").append(srvB).append("] ");
+                        }
+                    }
+                }
+            }
+        }
+        // Client-side TE state at the flower positions.
+        final StringBuilder te = new StringBuilder();
+        for (int dx = -1; dx <= 1; dx++) {
+            final net.minecraft.tileentity.TileEntity t = mc.world.getTileEntity(
+                    new net.minecraft.util.math.BlockPos(botFx + dx, botFy, botFz));
+            te.append('(').append(dx).append(')').append(t == null ? "no-te" : t.getClass().getSimpleName())
+              .append(' ');
+        }
+        VulkanMod.LOGGER.info("[VKPROF] botania: desync[{}] diffs={} {} TE:{} (clientTime={})",
+                tag, diffs, sb.toString().trim(), te.toString().trim(),
+                mc.world.getWorldTime());
+    }
+
+    /** Runs server commands on the integrated server thread with logging. */
+    @Unique
+    private static void vulkanmod$runServerCommands(Minecraft mc, String[] cmds) {        final MinecraftServer server = mc.getIntegratedServer();
+        if (server == null) {
+            return;
+        }
+        server.addScheduledTask(() -> {
+            for (String c : cmds) {
+                try {
+                    final int r = server.getCommandManager().executeCommand(server, c);
+                    VulkanMod.LOGGER.info("[VKPROF] botania: cmd '{}' -> {}", c, r);
+                } catch (Throwable t) {
+                    VulkanMod.LOGGER.warn("[VKPROF] botania: cmd '{}' failed", c, t);
+                }
+            }
+        });
+    }
+
+    /**
+     * Resolves a tech-mod machine block + metadata into an IBlockState to place.
+     * Mods register machines inconsistently: some as clean separate blocks
+     * (appliedenergistics2:inscriber, enderio:block_alloy_smelter,
+     * thermalexpansion:machine, ic2:te, immersiveengineering:wooden_device0),
+     * others as metadata variants of a shared block (Mekanism's crusher is
+     * meta 3 of mekanism:machineblock; the lang key is
+     * tile.MachineBlock.Crusher.name). So we look the hint up as an exact
+     * registry name and apply the supplied meta (the map carries the correct
+     * meta per mod). A "domain:token" fallback exists for safety. The chosen
+     * block + meta + display key is always logged.
+     */
+    @Unique
+    private static net.minecraft.block.state.IBlockState vulkanmod$resolveTechState(String hint, int meta) {
+        // "domain:block#enumValue" selects a metadata/property value BY NAME
+        // instead of a hardcoded meta. Needed for IC2's ic2:te, whose machine
+        // type is an enum property (TeBlock), not a plain meta. meta is still
+        // used as a fallback when no "#name" is supplied.
+        String blockHint = hint;
+        String namedValue = null;
+        final int hash = hint.indexOf('#');
+        if (hash >= 0) {
+            blockHint = hint.substring(0, hash);
+            namedValue = hint.substring(hash + 1).toLowerCase(java.util.Locale.ROOT);
+        }
+        final net.minecraft.util.ResourceLocation rl = new net.minecraft.util.ResourceLocation(blockHint);
+        net.minecraft.block.Block exact = net.minecraft.block.Block.REGISTRY.getObject(rl);
+        if (exact == null || exact == net.minecraft.init.Blocks.AIR) {
+            // Fallback: registry name "domain:token".
+            final String full = rl.toString();
+            final int i = full.indexOf(':');
+            final String domain = (i >= 0 ? full.substring(0, i) : "minecraft").toLowerCase(java.util.Locale.ROOT);
+            final String token = (i >= 0 ? full.substring(i + 1) : full).toLowerCase(java.util.Locale.ROOT);
+            for (net.minecraft.block.Block b : net.minecraft.block.Block.REGISTRY) {
+                final net.minecraft.util.ResourceLocation rn = b.getRegistryName();
+                if (rn == null) {
+                    continue;
+                }
+                if (rn.toString().equalsIgnoreCase(domain + ":" + token)) {
+                    exact = b;
+                    break;
+                }
+            }
+        }
+        if (exact == null || exact == net.minecraft.init.Blocks.AIR) {
+            VulkanMod.LOGGER.warn("[VKPROF] techgui: resolve '{}' FAILED (no registry name matched)", hint);
+            return null;
+        }
+        // IC2 special-case: ic2:te is one block whose machine type is an ITeBlock
+        // selected via BlockTileEntity.getState(ITeBlock). The generic named-value
+        // matcher only sees MetaTeBlock.toString() (not the ITeBlock identifier or
+        // enum name), so resolve it directly here. ic2 is not on the compile
+        // classpath, hence the reflection.
+        if ("ic2:te".equals(blockHint)) {
+            try {
+                Class<?> bteCls = Class.forName("ic2.core.block.BlockTileEntity");
+                if (bteCls.isInstance(exact)) {
+                    Class<?> iteCls = Class.forName("ic2.core.block.ITeBlock");
+                    final java.util.Set<?> allTypes =
+                            (java.util.Set<?>) bteCls.getMethod("getAllTypes").invoke(exact);
+                    final String want = (namedValue != null) ? namedValue : "generator";
+                    for (Object ite : allTypes) {
+                        Object id = ite.getClass().getMethod("getIdentifier").invoke(ite);
+                        final String path = (String) id.getClass().getMethod("getPath").invoke(id);
+                        final String ename = (ite instanceof java.lang.Enum)
+                                ? ((java.lang.Enum<?>) ite).name() : "";
+                        if (want.equalsIgnoreCase(path) || want.equalsIgnoreCase(ename)) {
+                            final Object st = bteCls.getMethod("getState", iteCls).invoke(exact, ite);
+                            if (st instanceof net.minecraft.block.state.IBlockState) {
+                                VulkanMod.LOGGER.info("[VKPROF] techgui: resolve '{}' -> ic2:te ITeBlock '{}'",
+                                        hint, path);
+                                return (net.minecraft.block.state.IBlockState) st;
+                            }
+                        }
+                    }
+                    VulkanMod.LOGGER.warn("[VKPROF] techgui: resolve '{}' ITeBlock '{}' not found", hint, want);
+                }
+            } catch (Throwable t) {
+                VulkanMod.LOGGER.warn("[VKPROF] techgui: resolve ic2 FAILED", t);
+            }
+        }
+        final net.minecraft.block.state.IBlockState base = exact.getStateFromMeta(meta);
+        if (namedValue != null) {
+            for (net.minecraft.block.properties.IProperty<?> p : base.getPropertyKeys()) {
+                for (Object v : p.getAllowedValues()) {
+                    final String vname = (v instanceof java.lang.Enum)
+                            ? ((java.lang.Enum<?>) v).name() : String.valueOf(v);
+                    if (vname.equalsIgnoreCase(namedValue)) {
+                        @SuppressWarnings("unchecked")
+                        final net.minecraft.block.state.IBlockState s =
+                                base.withProperty((net.minecraft.block.properties.IProperty) p, (Comparable) v);
+                        VulkanMod.LOGGER.info("[VKPROF] techgui: resolve '{}' -> {} (prop {} = {})",
+                                hint, exact.getRegistryName(), p.getName(), vname);
+                        return s;
+                    }
+                }
+            }
+            VulkanMod.LOGGER.warn("[VKPROF] techgui: resolve '{}' named value '{}' not found on {}, using meta {}",
+                    hint, namedValue, exact.getRegistryName(), meta);
+        }
+        VulkanMod.LOGGER.info("[VKPROF] techgui: resolve '{}' -> {} meta={} (key={})",
+                hint, exact.getRegistryName(), meta, base.getBlock().getTranslationKey());
+        return base;
+    }
+
+    /**
+     * Tech-mod machine-GUI test sequence (TECHGUI_TEST=1). One mod per run:
+     * build a 7x7 grass platform at y=99 -> teleport the SERVER player onto it
+     * facing a machine placed ~1.5 blocks ahead -> open the machine GUI on the
+     * server thread (the real right-click path) -> wait for the open-window
+     * packet to reach the client -> capture techgui_<label>.png (and log the
+     * screen class so the harness can confirm a GUI actually opened) -> close
+     * the GUI -> quit.
+     *
+     * <p>Block/meta table per mod (best-known for 1.12.2):
+     *   enderio             -&gt; enderio:alloy_smelter            (meta 0)
+     *   thermalexpansion    -&gt; thermalexpansion:machine         (meta 1 = Pulverizer)
+     *   mekanism            -&gt; mekanism:crusher                (meta 0)
+     *   appliedenergistics2 -&gt; appliedenergistics2:inscriber   (meta 0)
+     *   immersiveengineering-&gt; immersiveengineering:wooden_device0 (meta 0 = Crafting Table)
+     *   ic2                 -&gt; ic2:te#generator              (TeBlock enum "generator")
+     */
+    @Unique
+    private static void vulkanmod$techGuiTick(Minecraft mc, long dt) {
+        // Resolve which machine to open from loaded mods (first match wins).
+        if (!compatTechGuiEnabled) {
+            compatTechGuiEnabled = true;
+            final Object[][] map = {
+                {"enderio", "enderio:block_alloy_smelter", 0},
+                {"thermalexpansion", "thermalexpansion:machine", 1},
+                {"mekanism", "mekanism:machineblock", 3},
+                {"appliedenergistics2", "appliedenergistics2:inscriber", 0},
+                {"immersiveengineering", "immersiveengineering:wooden_device0", 0},
+                {"ic2", "ic2:te#generator", 0},
+            };
+            for (Object[] e : map) {
+                if (Loader.isModLoaded((String) e[0])) {
+                    techTargetMod = (String) e[0];
+                    techTargetBlock = (String) e[1];
+                    techTargetMeta = (Integer) e[2];
+                    break;
+                }
+            }
+            VulkanMod.LOGGER.info("[VKPROF] techgui: target mod={} block={} meta={}",
+                    techTargetMod, techTargetBlock, techTargetMeta);
+            if (techTargetMod.isEmpty()) {
+                VulkanMod.LOGGER.warn("[VKPROF] techgui: no known tech mod loaded, quitting");
+                mc.shutdown();
+                return;
+            }
+        }
+
+        // Platform + clear air above so the camera has a clean frame.
+        if (!techPlatformBuilt && dt > 500) {
+            techPlatformBuilt = true;
+            vulkanmod$runServerCommands(mc, new String[]{
+                    "fill -3 99 -3 3 99 3 minecraft:grass",
+                    "fill -3 100 -3 3 110 3 minecraft:air",
+            });
+            VulkanMod.LOGGER.info("[VKPROF] techgui: platform queued (grass y=99, 7x7)");
+        }
+
+        // Server-authoritative teleport onto the platform facing +Z (yaw 0), so
+        // the machine placed at z=+1 is ahead of the camera.
+        if (techPlatformBuilt && !techServerTp && dt > 1200) {
+            techServerTp = true;
+            final net.minecraft.server.MinecraftServer server0 = mc.getIntegratedServer();
+            if (server0 != null) {
+                server0.addScheduledTask(() -> {
+                    try {
+                        final java.util.List<net.minecraft.entity.player.EntityPlayerMP> players =
+                                server0.getPlayerList().getPlayers();
+                        if (!players.isEmpty()) {
+                            players.get(0).connection.setPlayerLocation(
+                                    0.5, 100.0, -0.5, 0.0F, 20.0F);
+                        }
+                    } catch (Throwable t) {
+                        VulkanMod.LOGGER.warn("[VKPROF] techgui: server teleport FAILED", t);
+                    }
+                });
+            }
+            mc.player.setLocationAndAngles(0.5, 100.0, -0.5, 0.0F, 20.0F);
+            mc.player.setPositionAndUpdate(0.5, 100.0, -0.5);
+            VulkanMod.LOGGER.info("[VKPROF] techgui: server teleport queued (0.5,100,-0.5) yaw=0");
+        }
+
+        // Place the machine 1.5 blocks ahead (z=+1) DIRECTLY in the server
+        // world. We deliberately do NOT use the /setblock command: its block
+        // parser fails to resolve many mod block names and silently returns 0
+        // (the machine is never actually placed, so the GUI never opens). Going
+        // through Block.REGISTRY + World.setBlockState on the real server world
+        // is the same reliable path the TF-portal harness uses. We also keep a
+        // dirt->grass toggle on the platform so the floor is visible.
+        if (techServerTp && !techBlockPlaced && dt > 1800) {
+            techBlockPlaced = true;
+            final String blk = techTargetBlock;
+            final int meta = techTargetMeta;
+            final net.minecraft.server.MinecraftServer server0 = mc.getIntegratedServer();
+            if (server0 != null) {
+                server0.addScheduledTask(() -> {
+                    try {
+                        final net.minecraft.world.WorldServer w = server0.getWorld(0);
+                        final net.minecraft.block.state.IBlockState state = vulkanmod$resolveTechState(blk, meta);
+                        if (state == null || state.getBlock() == net.minecraft.init.Blocks.AIR) {
+                            VulkanMod.LOGGER.warn("[VKPROF] techgui: PLACE FAILED, block not resolved: {}", blk);
+                            return;
+                        }
+                        final net.minecraft.util.math.BlockPos pos =
+                                new net.minecraft.util.math.BlockPos(0, 100, 1);
+                        w.setBlockState(pos, state, 3);
+                        w.getPlayerChunkMap().markBlockForUpdate(pos);
+                        // Guarantee the tile entity exists on BOTH sides. Some mods
+                        // (IC2) do not create their TE through Forge's normal
+                        // setBlockState path, and most mod GUIs (IE crates) require
+                        // the CLIENT TE to exist before the open-window packet so
+                        // their client GUI handler can resolve it. We force-create
+                        // the server TE if missing and push a FULL TE packet
+                        // (writeToNBT) -- getUpdatePacket() is null for a freshly
+                        // placed, not-yet-dirty TE and would never create the client TE.
+                        net.minecraft.tileentity.TileEntity teSync = w.getTileEntity(pos);
+                        if (teSync == null) {
+                            final net.minecraft.block.Block tb = state.getBlock();
+                            teSync = tb.createTileEntity(w, state);
+                            if (teSync == null) {
+                                // IC2 registers TEs via its own ITeBlock system, not
+                                // Forge's standard registry, so the default
+                                // createTileEntity returns null and no TE is created.
+                                // Build it through IC2's ITeBlock.getTeClass() so the
+                                // machine (and its GUI) are fully functional. Pure
+                                // reflection so the harness compiles without IC2 on the
+                                // classpath; Class.forName throws (caught) when IC2 is
+                                // absent, leaving other mods untouched.
+                                try {
+                                    // BlockTileEntity implements IMultiBlock<ITeBlock> and
+                                    // does NOT override createTileEntity, so Forge's default
+                                    // returns null and no TE is created. The placed state
+                                    // carries its machine type via the IProperty whose value
+                                    // class is MetaTeBlock; that wrapper exposes the ITeBlock
+                                    // through its public `teBlock` field. From the ITeBlock we
+                                    // obtain the TE class and instantiate it ourselves.
+                                    Class<?> metaTeCls = Class.forName("ic2.core.ref.MetaTeBlock");
+                                    net.minecraft.block.properties.IProperty<?> typeProp = null;
+                                    for (net.minecraft.block.properties.IProperty<?> p :
+                                            state.getPropertyKeys()) {
+                                        if (metaTeCls.isAssignableFrom(p.getValueClass())) {
+                                            typeProp = p;
+                                            break;
+                                        }
+                                    }
+                                    if (typeProp != null) {
+                                        Object metaTe = state.getValue(typeProp);
+                                        if (metaTe != null) {
+                                            Object ite = metaTeCls.getField("teBlock").get(metaTe);
+                                            if (ite != null) {
+                                                Class<?> teCls = (Class<?>) ite.getClass()
+                                                        .getMethod("getTeClass").invoke(ite);
+                                                if (teCls != null) {
+                                                    Object teObj = teCls.getDeclaredConstructor().newInstance();
+                                                    if (teObj instanceof net.minecraft.tileentity.TileEntity) {
+                                                        net.minecraft.tileentity.TileEntity te2 =
+                                                                (net.minecraft.tileentity.TileEntity) teObj;
+                                                        te2.setWorld(w);
+                                                        te2.setPos(pos);
+                                                        w.setTileEntity(pos, te2);
+                                                        teSync = te2;
+                                                    }
+                                                } else {
+                                                    VulkanMod.LOGGER.warn("[VKPROF] techgui: ic2 ITeBlock.getTeClass() returned null");
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (teSync == null) {
+                                        VulkanMod.LOGGER.warn("[VKPROF] techgui: ic2 TE not built "
+                                                + "(no MetaTeBlock type prop / teBlock)");
+                                    }
+                                } catch (Throwable t) {
+                                    VulkanMod.LOGGER.warn("[VKPROF] techgui: ic2 TE create failed", t);
+                                }
+                            }
+                            if (teSync != null) w.setTileEntity(pos, teSync);
+                        }
+                        if (teSync != null) {
+                            final net.minecraft.nbt.NBTTagCompound teNbt =
+                                    new net.minecraft.nbt.NBTTagCompound();
+                            teSync.writeToNBT(teNbt);
+                            final net.minecraft.network.play.server.SPacketUpdateTileEntity syncPkt =
+                                    new net.minecraft.network.play.server.SPacketUpdateTileEntity(pos, 0, teNbt);
+                            for (net.minecraft.entity.player.EntityPlayerMP sp :
+                                    server0.getPlayerList().getPlayers())
+                                sp.connection.sendPacket(syncPkt);
+                        }
+                        final net.minecraft.block.state.IBlockState after = w.getBlockState(pos);
+                        VulkanMod.LOGGER.info("[VKPROF] techgui: PLACED '{}' meta={} -> server sees {} (class {})",
+                                blk, meta,
+                                net.minecraft.block.Block.REGISTRY.getNameForObject(after.getBlock()),
+                                after.getBlock().getClass().getName());
+                    } catch (Throwable t) {
+                        VulkanMod.LOGGER.warn("[VKPROF] techgui: place block FAILED", t);
+                    }
+                });
+            }
+            // Refresh the platform floor (command path works fine for vanilla blocks).
+            vulkanmod$runServerCommands(mc, new String[]{
+                    "fill -3 99 -3 3 99 3 minecraft:dirt",
+                    "fill -3 99 -3 3 99 3 minecraft:grass",
+            });
+            VulkanMod.LOGGER.info("[VKPROF] techgui: machine placement '{}' meta={} queued (direct)", blk, meta);
+        }
+
+        // Open the machine GUI by invoking block.onBlockActivated directly on the
+        // SERVER thread with the server player. This bypasses the reach/ray-trace
+        // path and the server definitely has the placed block, so it is the most
+        // reliable way to open a mod GUI headlessly. openGui() then flows the
+        // open-window packet back to the client. We also force a client
+        // block-update so the machine is actually visible in the screenshot.
+        if (techBlockPlaced && !techGuiOpenRequested && dt > 3200) {
+            techGuiOpenRequested = true;
+            final net.minecraft.server.MinecraftServer server0 = mc.getIntegratedServer();
+            if (server0 != null) {
+                server0.addScheduledTask(() -> {
+                    try {
+                        final net.minecraft.world.WorldServer w = server0.getWorld(0);
+                        final net.minecraft.util.math.BlockPos pos =
+                                new net.minecraft.util.math.BlockPos(0, 100, 1);
+                        final net.minecraft.block.state.IBlockState st = w.getBlockState(pos);
+                        final net.minecraft.block.Block b = st.getBlock();
+                        VulkanMod.LOGGER.info("[VKPROF] techgui: SERVER block at machine pos = {} (class {})",
+                                net.minecraft.block.Block.REGISTRY.getNameForObject(b),
+                                b.getClass().getName());
+                        final java.util.List<net.minecraft.entity.player.EntityPlayerMP> players =
+                                server0.getPlayerList().getPlayers();
+                        if (players.isEmpty()) {
+                            VulkanMod.LOGGER.warn("[VKPROF] techgui: no server player to open GUI");
+                            return;
+                        }
+                        final net.minecraft.entity.player.EntityPlayerMP mp = players.get(0);
+                        // Re-send the tile-entity data to the client so mods whose
+                        // client GUI handler looks up the TE (e.g. IE crates) can
+                        // actually open their screen.
+                        final net.minecraft.tileentity.TileEntity teAt = w.getTileEntity(pos);
+                        VulkanMod.LOGGER.info("[VKPROF] techgui: SERVER te at machine pos = {}",
+                                teAt == null ? "null" : teAt.getClass().getName());
+                        if (teAt != null) {
+                            final net.minecraft.nbt.NBTTagCompound teNbt2 =
+                                    new net.minecraft.nbt.NBTTagCompound();
+                            teAt.writeToNBT(teNbt2);
+                            final net.minecraft.network.play.server.SPacketUpdateTileEntity tePkt2 =
+                                    new net.minecraft.network.play.server.SPacketUpdateTileEntity(pos, 0, teNbt2);
+                            mp.connection.sendPacket(tePkt2);
+                        }
+                        // Force the client to receive the machine block update.
+                        w.getPlayerChunkMap().markBlockForUpdate(pos);
+                        final boolean opened = b.onBlockActivated(w, pos, st, mp,
+                                net.minecraft.util.EnumHand.MAIN_HAND,
+                                net.minecraft.util.EnumFacing.UP, 0.5F, 0.5F, 0.5F);
+                        VulkanMod.LOGGER.info("[VKPROF] techgui: SERVER onBlockActivated('{}') -> {} (distSq={} container={})",
+                                techTargetBlock, opened,
+                                String.format(java.util.Locale.ROOT, "%.2f", mp.getDistanceSqToCenter(pos)),
+                                mp.openContainer != null ? mp.openContainer.getClass().getSimpleName() : "null");
+                    } catch (Throwable t) {
+                        VulkanMod.LOGGER.warn("[VKPROF] techgui: open GUI FAILED", t);
+                    }
+                });
+            }
+            VulkanMod.LOGGER.info("[VKPROF] techgui: open GUI requested (server thread)");
+        }
+
+        // After the open-window packet reaches the client, log the screen class
+        // (proves a mod GUI actually opened) and the client block state (proves
+        // the machine is visible), then capture.
+        if (techGuiOpenRequested && !techGuiShot && dt > 4400) {
+            techGuiShot = true;
+            final net.minecraft.util.math.BlockPos pos =
+                    new net.minecraft.util.math.BlockPos(0, 100, 1);
+            final net.minecraft.block.Block b = mc.world.getBlockState(pos).getBlock();
+            final String screen = (mc.currentScreen == null)
+                    ? "null" : mc.currentScreen.getClass().getName();
+            techGuiOpened = (mc.currentScreen != null);
+            VulkanMod.LOGGER.info("[VKPROF] techgui: CLIENT block at machine pos = {} ; screen after open = {}",
+                    net.minecraft.block.Block.REGISTRY.getNameForObject(b), screen);
+            vulkanmod$captureTo(mc, "techgui_" + techTargetMod);
+        }
+
+        // Close the GUI (client-initiated; sends CPacketCloseWindow to server).
+        if (techGuiShot && !techGuiClosed && dt > 5200) {
+            techGuiClosed = true;
+            if (mc.currentScreen != null) {
+                mc.player.closeScreen();
+            }
+            VulkanMod.LOGGER.info("[VKPROF] techgui: GUI closed");
+        }
+
+        // Done.
+        if (!compatQuit && dt > 6400) {
+            compatQuit = true;
+            VulkanMod.LOGGER.info("[VKPROF] techgui: sequence complete, quitting (opened={})",
+                    techGuiOpened);
+            mc.shutdown();
+        }
+    }
+
+    /**
+     * Render-fix regression sequence (FIXTEST=1, needs AUTOJOIN=1).
+     * <ul>
+     *   <li>F3 axes: force the debug overlay on and capture
+     *       {@code fixtest_f3.png}. The axes are
+     *       {@code OpenGlHelper.renderDirections} - a GL_LINES batch whose
+     *       index buffer used to be the QUADS generator, so the rays rendered
+     *       as wide filled triangles. reducedDebugInfo is forced off because
+     *       GuiIngame only draws the axes when it is false.</li>
+     *   <li>End portal: build a stage, place an {@code end_portal} block, aim
+     *       the camera at its top face and capture {@code fixtest_endportal.png}.
+     *       The starfield is texGen-driven POSITION_COLOR geometry (no UV
+     *       attribute); before the fix the pipeline had no sampler and the
+     *       portal drew as flat untextured quads.</li>
+     * </ul>
+     */
+    @Unique
+    private static void vulcraft$fixTick(Minecraft mc, long dt) {
+        // 1. F3 direction axes.
+        if (!fixF3On && dt > 2000) {
+            fixF3On = true;
+            mc.gameSettings.showDebugInfo = true;
+            mc.gameSettings.reducedDebugInfo = false;
+            VulkanMod.LOGGER.info("[VKPROF] fixtest: debug overlay on");
+        }
+        if (fixF3On && !fixF3Shot && dt > 4000) {
+            fixF3Shot = true;
+            vulkanmod$captureTo(mc, "fixtest_f3");
+        }
+
+        // 2. Stage: grass floor at y=99 (top surface = y=100), air above.
+        if (!fixStageBuilt && dt > 5000) {
+            fixStageBuilt = true;
+            vulkanmod$runServerCommands(mc, new String[]{
+                    "fill -6 99 -6 6 99 6 minecraft:grass",
+                    "fill -6 100 -6 6 104 6 minecraft:air",
+            });
+            VulkanMod.LOGGER.info("[VKPROF] fixtest: stage queued (grass y=99, air y=100..104)");
+        }
+
+        // 3. Teleport to (-4.5, 100, 0.5) facing +X (yaw -90, pitch 10: the
+        //    portal's UP-face quad at y+0.75 sits just below the eye line), then
+        //    place the end portal at (0, 100, 0) on the server world.
+        if (fixStageBuilt && !fixPortalPlaced && dt > 6000) {
+            fixPortalPlaced = true;
+            final net.minecraft.server.MinecraftServer server0 = mc.getIntegratedServer();
+            if (server0 != null) {
+                server0.addScheduledTask(() -> {
+                    try {
+                        final java.util.List<net.minecraft.entity.player.EntityPlayerMP> players =
+                                server0.getPlayerList().getPlayers();
+                        if (!players.isEmpty()) {
+                            players.get(0).connection.setPlayerLocation(
+                                    -4.5, 100.0, 0.5, -90.0F, 10.0F);
+                        }
+                    } catch (Throwable t) {
+                        VulkanMod.LOGGER.warn("[VKPROF] fixtest: server teleport FAILED", t);
+                    }
+                });
+            }
+            mc.player.setLocationAndAngles(-4.5, 100.0, 0.5, -90.0F, 10.0F);
+            mc.player.setPositionAndUpdate(-4.5, 100.0, 0.5);
+            if (server0 != null) {
+                server0.addScheduledTask(() -> {
+                    try {
+                        final net.minecraft.world.WorldServer w = server0.getWorld(0);
+                        final net.minecraft.util.math.BlockPos pos =
+                                new net.minecraft.util.math.BlockPos(0, 100, 0);
+                        w.setBlockState(pos, net.minecraft.init.Blocks.END_PORTAL.getDefaultState(), 3);
+                        w.getPlayerChunkMap().markBlockForUpdate(pos);
+                        final net.minecraft.block.state.IBlockState after = w.getBlockState(pos);
+                        VulkanMod.LOGGER.info("[VKPROF] fixtest: end portal placed -> {} (TE {})",
+                                after.getBlock(),
+                                w.getTileEntity(pos) != null ? w.getTileEntity(pos).getClass().getSimpleName() : "null");
+                    } catch (Throwable t) {
+                        VulkanMod.LOGGER.warn("[VKPROF] fixtest: end portal placement FAILED", t);
+                    }
+                });
+            }
+            VulkanMod.LOGGER.info("[VKPROF] fixtest: teleported + portal queued");
+        }
+
+        // 4. Capture the portal.
+        if (fixPortalPlaced && !fixPortalShot && dt > 9000) {
+            fixPortalShot = true;
+            vulkanmod$captureTo(mc, "fixtest_endportal");
+        }
+
+        // Done.
+        if (!fixQuit && dt > 11000) {
+            fixQuit = true;
+            VulkanMod.LOGGER.info("[VKPROF] fixtest: sequence complete, quitting (f3={} portal={})",
+                    fixF3Shot, fixPortalShot);
+            mc.shutdown();
+        }
+    }
+
+    /**
+     * Window-minimise regression sequence (MINITEST=1, needs AUTOJOIN=1).
+     *
+     * <p>Iconifying a GLFW window drives the framebuffer size to 0x0, which
+     * makes the surface's {@code currentExtent} 0x0 as well - the swapchain
+     * cannot exist in that state. The game loop keeps running while minimised,
+     * so every frame has to survive a swapchain that is either gone or
+     * out of date, and restoring the window has to rebuild it. This sequence
+     * captures {@code minitest_before} (normal), stays iconified for several
+     * seconds of live frames, then captures {@code minitest_after} (restored).
+     */
+    @Unique
+    private static void vulcraft$miniTick(Minecraft mc, long dt) {
+        // 1. Baseline frame while the window is normal.
+        if (!miniBeforeShot && dt > 5000) {
+            miniBeforeShot = true;
+            vulkanmod$captureTo(mc, "minitest_before");
+        }
+
+        // 2. Minimise. glfwIconifyWindow is a request - the actual iconify
+        //    (and the resulting 0x0 framebuffer) is delivered by the next
+        //    glfwPollEvents, i.e. inside Display.update().
+        if (miniBeforeShot && !miniIconified && dt > 6000) {
+            miniIconified = true;
+            final long w = Display.getWindow();
+            VulkanMod.LOGGER.info("[VKPROF] minitest: iconifying window 0x{}", Long.toHexString(w));
+            org.lwjgl.glfw.GLFW.glfwIconifyWindow(w);
+        }
+
+        // 3. Stay minimised long enough for a few dozen frames to run through
+        //    whatever the 0x0-extent path does.
+        if (miniIconified && !miniRestored && dt > 11000) {
+            miniRestored = true;
+            VulkanMod.LOGGER.info("[VKPROF] minitest: restoring window 0x{}",
+                    Long.toHexString(Display.getWindow()));
+            org.lwjgl.glfw.GLFW.glfwRestoreWindow(Display.getWindow());
+        }
+
+        // 4. Frame after the restore - the swapchain has to be back.
+        if (miniRestored && !miniAfterShot && dt > 14000) {
+            miniAfterShot = true;
+            vulkanmod$captureTo(mc, "minitest_after");
+        }
+
+        if (!miniQuit && dt > 16000) {
+            miniQuit = true;
+            VulkanMod.LOGGER.info("[VKPROF] minitest: sequence complete, quitting (before={} after={})",
+                    miniBeforeShot, miniAfterShot);
+            mc.shutdown();
+        }
+    }
+
+    /**
+     * Selects the hotbar slot holding the item with the given registry name.
+     * Registry names in this environment are stored LOWERCASE (e.g.
+     * "botania:managun"), so the comparison is case-insensitive. If the item
+     * sits in the main inventory (slots 9-35) it is swapped into the current
+     * hotbar slot first.
+     */
+    @Unique
+    private static boolean vulkanmod$holdItem(Minecraft mc, String registryName) {
+        try {
+            int found = -1;
+            for (int i = 0; i < mc.player.inventory.mainInventory.size(); i++) {
+                final net.minecraft.item.ItemStack st = mc.player.inventory.mainInventory.get(i);
+                if (st == null || st.isEmpty()) {
+                    continue;
+                }
+                final net.minecraft.util.ResourceLocation id =
+                        net.minecraft.item.Item.REGISTRY.getNameForObject(st.getItem());
+                if (id != null && id.toString().equalsIgnoreCase(registryName)) {
+                    found = i;
+                    break;
+                }
+            }
+            if (found < 0) {
+                final StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < mc.player.inventory.mainInventory.size(); i++) {
+                    final net.minecraft.item.ItemStack st = mc.player.inventory.mainInventory.get(i);
+                    if (st == null || st.isEmpty()) {
+                        continue;
+                    }
+                    final net.minecraft.util.ResourceLocation id =
+                            net.minecraft.item.Item.REGISTRY.getNameForObject(st.getItem());
+                    sb.append(i).append('=').append(id).append(' ');
+                }
+                VulkanMod.LOGGER.info("[VKPROF] botania: holdItem('{}') not found; inventory: {}",
+                        registryName, sb.toString().trim());
+                return false;
+            }
+            if (found >= 9) {
+                final int cur = mc.player.inventory.currentItem;
+                final net.minecraft.item.ItemStack a = mc.player.inventory.mainInventory.get(found);
+                final net.minecraft.item.ItemStack b = mc.player.inventory.mainInventory.get(cur);
+                mc.player.inventory.mainInventory.set(found, b);
+                mc.player.inventory.mainInventory.set(cur, a);
+            } else {
+                mc.player.inventory.currentItem = found;
+            }
+            return true;
+        } catch (Throwable t) {
+            VulkanMod.LOGGER.warn("[VKPROF] botania: holdItem('{}') failed", registryName, t);
+        }
+        return false;
+    }
+
+    /** Gives a spread of items through the integrated server's command manager. */
+    @Unique
+    private static void vulkanmod$giveCompatItems(Minecraft mc) {
+        final MinecraftServer server = mc.getIntegratedServer();
+        if (server == null) {
+            return;
+        }
+        final String[] items = {
+                "minecraft:diamond 64",
+                "minecraft:golden_apple 16",
+                "minecraft:diamond_sword",
+                "minecraft:torch 64",
+                "minecraft:emerald 32",
+                "minecraft:book",
+        };
+        server.addScheduledTask(() -> {
+            for (String it : items) {
+                try {
+                    final int r = server.getCommandManager().executeCommand(server, "give @p " + it);
+                    VKProf.info("[VKPROF] compat give '{}' result={}", it, r);
+                } catch (Throwable t) {
+                    VKProf.warn("[VKPROF] compat give '{}' failed", it, t);
+                }
+            }
+        });
+    }
+
+    /** True when the client world is the Twilight Forest dimension. */
+    @Unique
+    private static boolean vulkanmod$isInTwilightForest(Minecraft mc) {
+        if (mc.world == null || mc.world.provider == null) {
+            return false;
+        }
+        return mc.world.provider.getClass().getName().toLowerCase(java.util.Locale.ROOT)
+                .contains("twilightforest");
+    }
+
+    /**
+     * Builds a 2x2 TF portal (water + grass rim + flowers) under the player and
+     * drops a diamond into it so TF forms the portal on its own.
+     */
+    @Unique
+    private static void vulkanmod$buildTFPortal(Minecraft mc) {
+        final MinecraftServer server = mc.getIntegratedServer();
+        if (server == null || mc.player == null) {
+            return;
+        }
+        final int px = net.minecraft.util.math.MathHelper.floor(mc.player.posX);
+        final int py = net.minecraft.util.math.MathHelper.floor(mc.player.posY);
+        final int pz = net.minecraft.util.math.MathHelper.floor(mc.player.posZ);
+        final int poolY = py;                 // water surface at the player's feet
+        final int x0 = px - 1, z0 = pz - 1;   // 2x2 water spans [x0,x0+1] x [z0,z0+1]
+        server.addScheduledTask(() -> {
+            try {
+                final WorldServer world = server.getWorld(0);
+                final IBlockState water = Blocks.WATER.getDefaultState();
+                final IBlockState grass = Blocks.GRASS.getDefaultState();
+                final IBlockState dirt = Blocks.DIRT.getDefaultState();
+                final IBlockState flower = Blocks.RED_FLOWER.getDefaultState();
+                final IBlockState air = Blocks.AIR.getDefaultState();
+                // 4x4 envelope around the 2x2 pool.
+                for (int x = x0 - 1; x <= x0 + 2; x++) {
+                    for (int z = z0 - 1; z <= z0 + 2; z++) {
+                        final boolean inPool = (x == x0 || x == x0 + 1) && (z == z0 || z == z0 + 1);
+                        world.setBlockState(new BlockPos(x, poolY - 1, z), dirt, 2);   // floor
+                        if (inPool) {
+                            world.setBlockState(new BlockPos(x, poolY, z), water, 2);    // water
+                            world.setBlockState(new BlockPos(x, poolY + 1, z), air, 2);  // open above water
+                        } else {
+                            world.setBlockState(new BlockPos(x, poolY, z), grass, 2);    // grass rim
+                            world.setBlockState(new BlockPos(x, poolY + 1, z), flower, 2); // flower on rim
+                        }
+                        world.setBlockState(new BlockPos(x, poolY + 2, z), air, 2);
+                    }
+                }
+                // Stand the player in the centre of the pool so they collide with
+                // the portal the instant it forms.
+                final double cx = x0 + 1.0 + 0.5, cy = poolY + 0.5, cz = z0 + 1.0 + 0.5;
+                mc.player.setLocationAndAngles(cx, cy, cz, 0.0f, 30.0f);
+                mc.player.setPositionAndUpdate(cx, cy, cz);
+                // Drop a diamond into a CORNER of the pool, INSIDE the water block
+                // (not above it): TF's checkForPortalCreation only forms the portal
+                // when the item's own block position is water (canFormPortal check).
+                // Infinite pickup delay so the player does not grab it first.
+                final EntityItem diamond = new EntityItem(world, x0 + 0.5, poolY + 0.8, z0 + 0.5,
+                        new net.minecraft.item.ItemStack(Items.DIAMOND));
+                diamond.setInfinitePickupDelay();
+                world.spawnEntity(diamond);
+                VulkanMod.LOGGER.info("[VKPROF] compat: TF portal built at ({},{},{}), diamond in water @({},{},{})",
+                        x0, poolY, z0, x0, poolY, z0);
+            } catch (Throwable t) {
+                VulkanMod.LOGGER.error("[VKPROF] compat TF portal build failed", t);
+            }
+        });
+    }
+
+    /** Teleports the host player to the Twilight Forest dimension (id 7 by default). */
+    @Unique
+    private static void vulkanmod$changeDimensionTf(Minecraft mc) {
+        final MinecraftServer server = mc.getIntegratedServer();
+        if (server == null) {
+            return;
+        }
+        server.addScheduledTask(() -> {
+            try {
+                final EntityPlayerMP mp = server.getPlayerList().getPlayers().get(0);
+                if (mp != null) {
+                    // TFConfig.dimension.dimensionID defaults to 7. changeDimension
+                    // creates the TF world on demand for the integrated server.
+                    mp.changeDimension(7);
+                    VKProf.info("[VKPROF] compat: changed dimension -> TWILIGHT FOREST (7)");
+                } else {
+                    VKProf.warn("[VKPROF] compat: no player to dimension-switch");
+                }
+            } catch (Throwable t) {
+                VulkanMod.LOGGER.error("[VKPROF] compat TF dimension change failed", t);
+            }
+        });
     }
 }

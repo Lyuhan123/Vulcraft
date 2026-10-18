@@ -6,6 +6,7 @@ import org.jetbrains.annotations.Nullable;
 import org.lwjgl.opengl.GL20;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
+import org.spongepowered.asm.mixin.Unique;
 
 import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
@@ -59,10 +60,38 @@ public class OpenGlHelperMixin {
     }
 
     /**
+     * TEMP DIAGNOSTIC: bounded log of every framebuffer bind/unbind so the
+     * sequence around the main-menu panorama copy is visible. vanilla's
+     * renderSkybox unbinds before drawing the panorama, so the copy must see
+     * id 0 last; anything that rebinds in between is the bug.
+     */
+    @Unique
+    private static int vulkanmod$fbLogs = 0;
+
+    @Unique
+    private static String vulkanmod$fbCaller() {
+        StackTraceElement[] st = java.lang.Thread.currentThread().getStackTrace();
+        for (StackTraceElement e : st) {
+            String c = e.getClassName();
+            if (c.startsWith("com.yuhan123.vulkanmod.mixin.gl")
+                    || c.startsWith("com.yuhan123.vulkanmod.gl")
+                    || c.startsWith("java.lang.Thread"))
+                continue;
+            return e.getClassName() + "." + e.getMethodName();
+        }
+        return "?";
+    }
+
+    /**
      * @author
      */
     @Overwrite()
     public static void glBindFramebuffer(int i, int j) {
+        if (vulkanmod$fbLogs < 24) {
+            vulkanmod$fbLogs++;
+            com.yuhan123.vulkanmod.VulkanMod.LOGGER.info("[VKPROF] glBindFramebuffer target={} id={} <- {}",
+                    i, j, vulkanmod$fbCaller());
+        }
         //RenderSystem.assertOnRenderThread();
         VkGlFramebuffer.bindFramebuffer(i, j);
     }

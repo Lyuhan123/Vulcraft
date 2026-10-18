@@ -205,6 +205,228 @@ public abstract class VRenderSystem {
     private static float shaderGlintAlpha;
     private static float shaderLineWidth;
 
+    // ------------------------------------------------------------------
+    // Fixed-function texture coordinate generation (GL texGen).
+    //
+    // Vanilla's only texGen user is TileEntityEndPortalRenderer: the end
+    // portal "starfield" is POSITION_COLOR geometry with NO UV attribute at
+    // all - every coordinate is generated in eye space from the eye planes
+    // (GL_EYE_LINEAR) and then pushed through the GL_TEXTURE matrix (which
+    // that renderer loads with the projection*modelview). Without this state
+    // the end portal rendered as flat untextured quads, i.e. "the end portal
+    // does not render correctly".
+    //
+    // Only the coordinates a 2D sampler consumes are published (S and T); R/Q
+    // are tracked for completeness. GL_OBJECT_LINEAR is not implemented (it
+    // would need the inverse modelview); it falls back to the eye-space
+    // behaviour and logs once.
+    // ------------------------------------------------------------------
+    /** bit 0 = S, 1 = T, 2 = R, 3 = Q: which texGen coordinates are enabled. */
+    public static int texGenMask = 0;
+    /** Per-coordinate mode: true = GL_EYE_LINEAR (9216), false = GL_OBJECT_LINEAR. */
+    public static final boolean[] texGenEyeLinear = {true, true, true, true};
+    /** GL_EYE_PLANE coefficients per coordinate (4 x vec4, column-major floats). */
+    public static final MappedBuffer[] texGenPlanes = new MappedBuffer[4];
+    /** 1.0 when S or T texGen is on - the shader's generate-or-not switch. */
+    public static boolean texGenEnabled = false;
+
+    static {
+        for (int i = 0; i < texGenPlanes.length; i++) {
+            texGenPlanes[i] = new MappedBuffer(16);
+        }
+        // GL defaults: identity eye planes (S=x, T=y, R=z).
+        texGenPlanes[0].putFloat(0, 1.0f);
+        texGenPlanes[1].putFloat(4, 1.0f);
+        texGenPlanes[2].putFloat(8, 1.0f);
+        texGenPlanes[3].putFloat(12, 1.0f);
+    }
+
+    /** texGen coordinate index for vanilla's TexGen enum ordinal (S,T,R,Q). */
+    public static void setTexGenCoordEnabled(int coord, boolean enabled) {
+        final int bit = 1 << coord;
+        final int old = texGenMask;
+        texGenMask = enabled ? (texGenMask | bit) : (texGenMask & ~bit);
+        if (old != texGenMask) {
+            texGenEnabled = (texGenMask & 0x3) != 0;
+            ++uniformVersion;
+        }
+    }
+
+    /** texGen(coord, GL_EYE_LINEAR / GL_OBJECT_LINEAR). */
+    public static void setTexGenMode(int coord, int mode) {
+        // 9216 = GL_EYE_LINEAR, 9217 = GL_OBJECT_LINEAR, 8448 = GL_SPHERE_MAP.
+        texGenEyeLinear[coord] = (mode != 9217 && mode != 8448);
+    }
+
+    /** texGen(coord, GL_EYE_PLANE, FloatBuffer) - the buffer holds 4 floats. */
+    public static void setTexGenPlane(int coord, java.nio.FloatBuffer plane) {
+        final MappedBuffer mb = texGenPlanes[coord];
+        for (int i = 0; i < 4; i++) {
+            mb.putFloat(i * 4, plane.get(i));
+        }
+        ++uniformVersion;
+    }
+
+    // ------------------------------------------------------------------
+    // Fixed-function material (glMaterial / glColorMaterial).
+    //
+    // 1.12.2 itself only ever touches these through
+    // RenderHelper.enableStandardItemLighting(), which pairs
+    // enableColorMaterial() + colorMaterial(GL_FRONT_AND_BACK,
+    // GL_AMBIENT_AND_DIFFUSE) and then relies on the GL default material -
+    // i.e. "the material colour IS the vertex colour". Mods, however, call
+    // glMaterial(GL_FRONT, GL_DIFFUSE, ...) directly to tint their models,
+    // and those calls used to land in an empty overwrite: the tint was
+    // silently dropped.
+    //
+    // State is tracked per face (index 0 = GL_FRONT, 1 = GL_BACK) because
+    // that is what GL does, but only the FRONT face is published to the
+    // shaders: the port's lighting is per-vertex with no winding-based face
+    // selection, and no Minecraft content sets the two faces differently.
+    // ------------------------------------------------------------------
+    /** glMaterialf/i/fv/iv pname values (GL11). */
+    public static final int GL_MAT_FRONT = 1028;
+    public static final int GL_MAT_BACK = 1029;
+    public static final int GL_MAT_FRONT_AND_BACK = 1032;
+    public static final int GL_MAT_AMBIENT = 4608;
+    public static final int GL_MAT_DIFFUSE = 4609;
+    public static final int GL_MAT_SPECULAR = 4610;
+    public static final int GL_MAT_EMISSION = 5632;
+    public static final int GL_MAT_SHININESS = 5633;
+    public static final int GL_MAT_AMBIENT_AND_DIFFUSE = 5634;
+    public static final int GL_MAT_COLOR_INDEXES = 5635;
+    public static final int GL_LIGHT_MODEL_AMBIENT = 2899;
+
+    /** [face][rgba]: face 0 = GL_FRONT, 1 = GL_BACK. Seeded to the GL defaults. */
+    public static final float[][] materialAmbient = new float[2][4];
+    public static final float[][] materialDiffuse = new float[2][4];
+    public static final float[][] materialSpecular = new float[2][4];
+    public static final float[][] materialEmission = new float[2][4];
+    /** [face]: GL_SHININESS is a single float, clamped to [0,128] by GL. */
+    public static final float[] materialShininess = new float[2];
+    /**
+     * vec3 views of the FRONT-face ambient/diffuse, mirrored from the arrays
+     * above so the uniform suppliers can hand out a stable MappedBuffer the
+     * way {@link #lightDirection0} does. Specular/emission/shininess are
+     * tracked for state fidelity but published to no shader: the item pipeline
+     * reproduces vanilla's ambient + two diffuse lights and nothing else.
+     */
+    public static final MappedBuffer materialAmbientView = new MappedBuffer(3 * 4);
+    public static final MappedBuffer materialDiffuseView = new MappedBuffer(3 * 4);
+
+    /** Mirrors GL_COLOR_MATERIAL. Vanilla's only user is RenderHelper (see above). */
+    public static boolean colorMaterialEnabled = false;
+    /** Last colorMaterial(face, mode) arguments - GL keeps them even when disabled. */
+    public static int colorMaterialFace = GL_MAT_FRONT_AND_BACK;
+    public static int colorMaterialMode = GL_MAT_AMBIENT_AND_DIFFUSE;
+
+    /**
+     * GL_LIGHT_MODEL_AMBIENT, set by {@code glLightModel(2899, ...)}. Defaulted
+     * to 0.4 rather than GL's own 0.2: both of vanilla's lighting setups
+     * ({@code enableGUIStandardItemLighting} / {@code enableStandardItemLighting})
+     * set 0.4, and the port hardcoded 0.4 in {@code light.glsl} before this
+     * existed, so 0.4 keeps every path that never calls glLightModel looking
+     * exactly as it does today.
+     */
+    public static final float[] lightModelAmbient = new float[4];
+
+    static {
+        for (int face = 0; face < 2; face++) {
+            materialAmbient[face][0] = 0.2f;  materialAmbient[face][1] = 0.2f;
+            materialAmbient[face][2] = 0.2f;  materialAmbient[face][3] = 1.0f;
+            materialDiffuse[face][0] = 0.8f;  materialDiffuse[face][1] = 0.8f;
+            materialDiffuse[face][2] = 0.8f;  materialDiffuse[face][3] = 1.0f;
+            materialSpecular[face][3] = 1.0f;
+            materialEmission[face][3] = 1.0f;
+        }
+        lightModelAmbient[0] = 0.4f;
+        lightModelAmbient[1] = 0.4f;
+        lightModelAmbient[2] = 0.4f;
+        lightModelAmbient[3] = 1.0f;
+        materialAmbientView.putFloat(0, 0.2f);
+        materialAmbientView.putFloat(4, 0.2f);
+        materialAmbientView.putFloat(8, 0.2f);
+        materialDiffuseView.putFloat(0, 0.8f);
+        materialDiffuseView.putFloat(4, 0.8f);
+        materialDiffuseView.putFloat(8, 0.8f);
+    }
+
+    /**
+     * Which material parameters track the current vertex colour, as a small
+     * code the item shader switches on: bit0 = ambient, bit1 = diffuse.
+     * 0 when GL_COLOR_MATERIAL is off, which is also the only case where the
+     * glMaterial-set values are used at all.
+     */
+    public static int colorMaterialTracking() {
+        if (!colorMaterialEnabled) {
+            return 0;
+        }
+        return switch (colorMaterialMode) {
+            case GL_MAT_AMBIENT -> 1;
+            case GL_MAT_DIFFUSE -> 2;
+            case GL_MAT_AMBIENT_AND_DIFFUSE -> 3;
+            default -> 0;
+        };
+    }
+
+    /**
+     * glMaterial(face, pname, value). {@code v1..v3} are only meaningful for
+     * the vec4-valued parameters; the scalar overloads (glMaterialf/i) pass
+     * them through and the vec4 overloads fill them.
+     */
+    public static void setMaterial(int face, int pname, float v0, float v1, float v2, float v3) {
+        final boolean front = face != GL_MAT_BACK;
+        final boolean back = face != GL_MAT_FRONT;
+        switch (pname) {
+            case GL_MAT_AMBIENT -> putVec4(materialAmbient, front, back, v0, v1, v2, v3);
+            case GL_MAT_DIFFUSE -> putVec4(materialDiffuse, front, back, v0, v1, v2, v3);
+            case GL_MAT_SPECULAR -> putVec4(materialSpecular, front, back, v0, v1, v2, v3);
+            case GL_MAT_EMISSION -> putVec4(materialEmission, front, back, v0, v1, v2, v3);
+            // GL clamps shininess to [0,128]; values outside are a GL error.
+            case GL_MAT_SHININESS -> {
+                final float s = Math.max(0.0f, Math.min(128.0f, v0));
+                if (front) materialShininess[0] = s;
+                if (back) materialShininess[1] = s;
+            }
+            case GL_MAT_COLOR_INDEXES -> {
+                // Colour-index materials are not modelled: no Minecraft content
+                // and no known mod uses them in colour-index mode.
+            }
+            default -> {
+            }
+        }
+        ++uniformVersion;
+    }
+
+    /** glLightModel(GL_LIGHT_MODEL_AMBIENT, FloatBuffer). */
+    public static void setLightModelAmbient(java.nio.FloatBuffer params) {
+        for (int i = 0; i < 4; i++) {
+            lightModelAmbient[i] = params.get(i);
+        }
+        ++uniformVersion;
+    }
+
+    private static void putVec4(float[][] target, boolean front, boolean back,
+                                float r, float g, float b, float a) {
+        if (front) {
+            target[0][0] = r; target[0][1] = g; target[0][2] = b; target[0][3] = a;
+        }
+        if (back) {
+            target[1][0] = r; target[1][1] = g; target[1][2] = b; target[1][3] = a;
+        }
+        // Mirror the FRONT face into the published views. Only ambient and
+        // diffuse are mirrored because only those reach a shader.
+        if (front && target == materialAmbient) {
+            materialAmbientView.putFloat(0, r);
+            materialAmbientView.putFloat(4, g);
+            materialAmbientView.putFloat(8, b);
+        } else if (front && target == materialDiffuse) {
+            materialDiffuseView.putFloat(0, r);
+            materialDiffuseView.putFloat(4, g);
+            materialDiffuseView.putFloat(8, b);
+        }
+    }
+
     private static float[] color = new float[4];
     private static float[] fogColor = new float[4];
 
@@ -259,6 +481,16 @@ public abstract class VRenderSystem {
 
     public static int getUniformVersion() {
         return uniformVersion;
+    }
+
+    /**
+     * Marks every uniform-derived UBO slice dirty so the next frame re-reads the
+     * suppliers. For callers outside this class (the GlStateManager / GL11
+     * overwrites that publish legacy fixed-function state); the in-class setters
+     * bump {@link #uniformVersion} directly.
+     */
+    public static void bumpUniformVersion() {
+        ++uniformVersion;
     }
 
     public static void initRenderer() {
